@@ -27,6 +27,14 @@ If a service is hosted on the emulated EKS (k3s) with an externally-facing inter
 
 ---
 
+## GAP-014 — rootless Quadlet socket dependency and boot ordering [OPEN]
+
+The `floci.container` declares `After=podman.socket` / `Requires=podman.socket` and relies on `[Install] WantedBy=default.target` for boot autostart. In rootless/user scope this cannot be verified in the macOS mock harness, and there are known cases where Quadlet dependency edges behave differently for user units at boot (see containers/podman#23077).
+
+**Action:** on the server, confirm that after a reboot (with lingering enabled) `floci.service` starts automatically, that it orders after the user `podman.socket` (so the mounted `%t/podman/podman.sock` exists), and that `systemctl --user start floci.service` — not `enable` — is the correct activation. If the hard `Requires=` causes activation failures when the socket is briefly unavailable, evaluate downgrading to `Wants=`.
+
+---
+
 ## How to add a new gap
 
 1. Add an entry with the next sequential GAP-NNN ID.

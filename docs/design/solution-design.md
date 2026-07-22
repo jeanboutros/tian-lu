@@ -133,21 +133,49 @@ Multi-account isolation is automatic via 12-digit numeric access key IDs — the
 
 ## 9. systemd user service
 
-The Floci container runs as a systemd user service (`floci.service`) in the `floci` user's session. Key characteristics:
+The Floci container runs as a **systemd user service** managed by a **Quadlet** unit — the current recommended way to run Podman containers under systemd (Podman 4.4+). Quadlet reads a declarative `.container` file and generates the backing `floci.service` on `systemctl --user daemon-reload`, wiring `Type=notify` + `--sdnotify=conmon` and same-name stale-container cleanup automatically. (`podman generate systemd` is deprecated and is not used.)
 
-- **User unit, not system unit** — the canonical rootless Podman model. The service runs within the user's systemd session, which requires `loginctl enable-linger`.
-- **Depends on `podman.socket`** — the service starts after the Podman socket is available.
-- **`EnvironmentFile`** — all `FLOCI_*` variables are in `~/.config/floci/floci.env` (mode `0600`, owned by `floci:floci`, written atomically with `install -m 0600 -o floci -g floci` to avoid TOCTOU race on the presign secret).
-- **Container name** — `--name tianlu-floci` in `ExecStart` so Podman DNS resolves the hostname for sidecar containers.
-- **`ExecStartPre`** — removes any stale container from an unclean shutdown before starting (`-/usr/bin/podman rm -f tianlu-floci`, leading `-` ignores failure).
-- **Stop sequence** — `--rm` on `podman run` handles container removal on exit. `ExecStop` uses `podman stop --time 30 tianlu-floci` for graceful JVM shutdown. No `ExecStopPost` (would contradict `--rm`).
-- **Hardening directives** — `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=%h`, `PrivateTmp`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`.
-- **`MemoryDenyWriteExecute` is not set** — Floci is JVM-based and requires write+execute memory pages.
-- **`RestrictNamespaces` is not set** — Podman requires namespace creation for rootless containers.
-- **`ProtectHome` is not set** — `ProtectHome=yes` masks `/home` entirely and `ReadWritePaths` cannot override it. The data directory and env file live under `/home/floci`. Rely on `0700` file permissions instead.
-- **Restart policy** — `on-failure` with 5s delay and a start limit of 5 per 60s to prevent crash loops.
+The unit lives at `~/.config/containers/systemd/floci.container` and is activated as the `floci` user (which requires `loginctl enable-linger`):
 
-### 8.1 Lingering and user manager readiness
+```bash
+systemctl --user daemon-reload            # regenerate floci.service from the .container
+systemctl --user start floci.service      # boot autostart comes from [Install] below
+```
+
+Quadlet-generated units are **transient** and cannot be `systemctl enable`d (systemd reports "Unit … is transient or generated"). Boot autostart is declared by `[Install] WantedBy=default.target` inside the `.container`, which Quadlet materialises on `daemon-reload`; the script therefore only needs `start` (idempotent — a no-op if already active).
+
+**`[Container]` section:**
+
+| Directive | Value | Notes |
+|---|---|---|
+| `Image` | `floci/floci:1.5.33-compat` | pinned |
+| `ContainerName` | `tianlu-floci` | must match `FLOCI_HOSTNAME` for Podman DNS |
+| `Network` | `floci-net` | references the network created imperatively in Phase 4 (no `.network` Quadlet, to avoid double-management) |
+| `EnvironmentFile` | `%h/.config/floci/floci.env` | all `FLOCI_*` vars; file is mode `0600`, `floci:floci`, written atomically |
+| `PublishPort` | `4566:4566`, `6379-6399:6379-6399`, `7001-7099:7001-7099` | proxy-in-Floci ports |
+| `Volume` | `%t/podman/podman.sock:/var/run/docker.sock:z` | rootless Podman socket, for sidecar spawning |
+| `Volume` | `%h/floci-data:/app/data:z` | persistent storage |
+
+`%h` = the user's home (`/home/floci`), `%t` = the runtime dir (`/run/user/<UID>`); Quadlet expands both. The `.container` also sets `After=podman.socket` and `Requires=podman.socket` in its `[Unit]` section — Quadlet does **not** add this automatically, and the socket must be active before the container starts (the mounted `%t/podman/podman.sock` must exist). `podman.socket` is a user-scoped unit enabled separately in Phase 3.
+
+**`[Service]` hardening** (applied to the generated unit):
+
+`NoNewPrivileges`, `ProtectSystem=strict`, **`ReadWritePaths=%h %t`**, `PrivateTmp`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops.
+
+- **`ReadWritePaths` must include `%t`, not only `%h`.** Under `ProtectSystem=strict` the filesystem is read-only except the listed paths. The Podman runtime and the mounted socket live under `/run/user/<UID>` (`%t`); omitting it makes the socket read-only and the container fails to start.
+
+**Directives that must NOT be set** (each breaks rootless Podman or the JVM):
+
+- `MemoryDenyWriteExecute` — Floci is JVM-based and needs write+execute memory pages.
+- `RestrictNamespaces` — Podman must create namespaces for rootless containers.
+- `ProtectHome` — masks `/home` entirely; `ReadWritePaths` cannot override it. The data dir and env file live under `/home/floci`; rely on `0700` permissions instead.
+- `PrivateNetwork` — breaks rootless container networking.
+
+Quadlet removes the hand-authored lifecycle plumbing the earlier design carried: no `ExecStartPre` stale-container removal, no `ExecStop`, no `--rm` juggling — `--sdnotify=conmon` handles readiness and Quadlet clears a leftover same-name container on start.
+
+**Manual-unit fallback (Podman < 4.4).** If Quadlet is unavailable, write a plain `floci.service` running `podman run` with `Type=notify`, `--sdnotify=conmon`, and `--cidfile=%t/floci.cid` (so `ExecStop` can `podman stop --cidfile %t/floci.cid`), plus `ExecStartPre=-/usr/bin/podman rm -f tianlu-floci` and the identical hardening block including `ReadWritePaths=%h %t`. This is a fallback only; Quadlet is preferred.
+
+### 9.1 Lingering and user manager readiness
 
 After `loginctl enable-linger floci`, the user manager starts asynchronously. The script polls for readiness using a two-stage check before any `systemctl --user` call:
 
@@ -323,11 +351,11 @@ Phase 5: Floci config
   → add_hosts_entry (127.0.0.1 tianlu-floci, managed marker block)
   → generate_presign_secret (idempotent: reuse if exists)
   → write_env_file (atomic: install -m 0600 -o floci -g floci)
-  → write_systemd_unit
+  → write_quadlet_unit (~/.config/containers/systemd/floci.container)
   [phase_pause]
 
 Phase 6: Start & verify
-  → enable_systemd_service
+  → enable_systemd_service (systemctl --user daemon-reload; start floci.service — Quadlet units are transient; autostart via [Install])
   → configure_firewall (assert UFW default deny, auto-detect /24 or RFC1918)
   → verify_health (curl --resolve tianlu-floci:4566:127.0.0.1 -k, retry loop)
   [phase_pause]

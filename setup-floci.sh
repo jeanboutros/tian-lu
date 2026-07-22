@@ -101,8 +101,8 @@ readonly UFW_RFC1918_SUBNETS=(
 readonly FLOCI_ENV_DIR="${FLOCI_ENV_DIR:-${FLOCI_HOME}/.config/floci}"
 readonly FLOCI_ENV_FILE="${FLOCI_ENV_FILE:-${FLOCI_ENV_DIR}/floci.env}"
 readonly FLOCI_DATA_DIR="${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}"
-readonly SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-${FLOCI_HOME}/.config/systemd/user}"
-readonly FLOCI_SERVICE_FILE="${FLOCI_SERVICE_FILE:-${SYSTEMD_USER_DIR}/floci.service}"
+readonly QUADLET_UNIT_DIR="${QUADLET_UNIT_DIR:-${FLOCI_HOME}/.config/containers/systemd}"
+readonly FLOCI_QUADLET_FILE="${FLOCI_QUADLET_FILE:-${QUADLET_UNIT_DIR}/floci.container}"
 
 # --- Interactive mode ---
 # When --interactive is set and stdin is a TTY, the script pauses at each
@@ -120,13 +120,123 @@ INTERACTIVE="${INTERACTIVE:-false}"
 # Phase 2: User setup      — create_floci_user, lock_password, configure_subuid_subgid
 # Phase 3: Podman setup    — install_podman, enable_lingering, configure_xdg_runtime, start_podman_socket
 # Phase 4: Network & image — create_podman_network, pull_floci_image
-# Phase 5: Floci config    — create_data_dir, add_hosts_entry, generate_presign_secret, write_env_file, write_systemd_unit
+# Phase 5: Floci config    — create_data_dir, add_hosts_entry, generate_presign_secret, write_env_file, write_quadlet_unit
 # Phase 6: Start & verify  — enable_systemd_service, configure_firewall, verify_health
 # Phase 7: Summary         — print_summary
 
 # ============================================================================
 # FUNCTIONS
 # ============================================================================
+
+# run_as_floci: privilege-drop helper — run a command as $FLOCI_USER with the
+# rootless environment properly set.
+#
+# Sets HOME, USER, PATH, XDG_RUNTIME_DIR, and DBUS_SESSION_BUS_ADDRESS so that
+# rootless Podman and systemd --user find the correct per-user directories under
+# /run/user/<UID>. Stdin is preserved so callers can pipe into tee or other
+# commands that read stdin.
+#
+# Usage: run_as_floci <cmd> [args...]
+run_as_floci() {
+  local uid
+  uid="$(id -u "$FLOCI_USER")"
+  sudo -u "$FLOCI_USER" env \
+    HOME="$FLOCI_HOME" \
+    USER="$FLOCI_USER" \
+    PATH="/usr/local/bin:/usr/bin:/bin" \
+    XDG_RUNTIME_DIR="/run/user/${uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+    -- "$@"
+}
+
+# write_quadlet_unit: render the Quadlet .container file for the Floci service.
+#
+# Idempotent: if the target file already exists it is backed up to
+# ${FLOCI_QUADLET_FILE}.bak before being overwritten (per §13 of the design).
+# The file is written as $FLOCI_USER (run_as_floci tee) so ownership follows
+# naturally without requiring root-only install(1) flags. Mode is set to 0644.
+#
+# The write is atomic: content is written to a .tmp sidecar, mode is set on
+# the tmp file, then an atomic rename (mv -f) replaces the final target.
+# A mid-write crash therefore never leaves a truncated .container file.
+#
+# The existence check for the backup guard runs via run_as_floci to avoid an
+# identity/visibility mismatch — the file is owned by $FLOCI_USER and may not
+# be readable by root.
+#
+# %h and %t are Quadlet specifiers expanded at runtime by systemd — they must
+# appear literally in the file and must NOT be shell-expanded here.
+write_quadlet_unit() {
+  run_as_floci mkdir -p "$QUADLET_UNIT_DIR"
+
+  if run_as_floci test -f "$FLOCI_QUADLET_FILE"; then
+    run_as_floci cp "$FLOCI_QUADLET_FILE" "${FLOCI_QUADLET_FILE}.bak"
+  fi
+
+  run_as_floci tee "${FLOCI_QUADLET_FILE}.tmp" >/dev/null <<EOF
+[Unit]
+Description=Floci (AWS emulator) rootless container
+After=podman.socket
+Requires=podman.socket
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Container]
+Image=${FLOCI_IMAGE}
+ContainerName=${FLOCI_HOSTNAME}
+Network=${PODMAN_NETWORK}
+EnvironmentFile=%h/.config/floci/floci.env
+PublishPort=4566:4566
+PublishPort=6379-6399:6379-6399
+PublishPort=7001-7099:7001-7099
+Volume=%t/podman/podman.sock:/var/run/docker.sock:z
+Volume=%h/floci-data:/app/data:z
+
+[Service]
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h %t
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+  run_as_floci chmod 0644 "${FLOCI_QUADLET_FILE}.tmp"
+  run_as_floci mv -f "${FLOCI_QUADLET_FILE}.tmp" "$FLOCI_QUADLET_FILE"
+}
+
+# enable_systemd_service: activate the Quadlet-generated floci.service.
+#
+# Quadlet-generated units are TRANSIENT — systemctl enable returns "Unit is
+# transient or generated" and fails. Boot autostart is already declared by
+# [Install] WantedBy=default.target inside the .container file, which Quadlet
+# materialises on daemon-reload. The script therefore only needs `start`.
+#
+# Sequence:
+#   1. daemon-reload — Quadlet regenerates floci.service from the .container.
+#   2. Idempotent start — if is-active returns 0 the service is already running
+#      and we return immediately; otherwise `start` brings it up.
+enable_systemd_service() {
+  run_as_floci systemctl --user daemon-reload
+
+  if run_as_floci systemctl --user is-active --quiet floci.service; then
+    return 0
+  fi
+
+  run_as_floci systemctl --user start floci.service
+}
 
 # (Phase functions are implemented incrementally, one unit per commit.)
 

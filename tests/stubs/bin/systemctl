@@ -1,1 +1,53 @@
-../_stub
+#!/usr/bin/env bash
+#
+# Dedicated systemctl stub for bats tests.
+#
+# Logs the full invocation to $STUB_LOG, then resolves the exit code based on
+# the subcommand (first non-flag, non-"--user" argument).  This lets tests
+# control is-active independently from daemon-reload and start.
+#
+# Per-subcommand rc variables (underscores, upper-cased subcommand):
+#   STUB_RC_SYSTEMCTL_DAEMON_RELOAD   default 0
+#   STUB_RC_SYSTEMCTL_IS_ACTIVE       default 0
+#   STUB_RC_SYSTEMCTL_IS_ENABLED      default 0
+#   STUB_RC_SYSTEMCTL_START           default 0
+#   STUB_RC_SYSTEMCTL_ENABLE          default 0
+#   STUB_RC_SYSTEMCTL_STOP            default 0
+#   STUB_RC_SYSTEMCTL_RESTART         default 0
+#
+# Fallback: STUB_RC_SYSTEMCTL (the generic key) is used when no subcommand-
+# specific variable is set.  Default is 0.
+#
+# STUB_OUT_SYSTEMCTL is still honoured for stdout if set.
+set -u
+
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
+fi
+
+# Emit any configured stdout output.
+if [[ -n "${STUB_OUT_SYSTEMCTL:-}" ]]; then
+  printf '%s\n' "${STUB_OUT_SYSTEMCTL}"
+fi
+
+# Identify the subcommand: scan args, skip --user and any leading --foo / -x
+# flags, take the first plain word.
+subcommand=""
+for arg in "$@"; do
+  case "$arg" in
+    --user|--system|--global|--quiet|-q|--no-pager|--no-legend) continue ;;
+    --*|-*) continue ;;
+    *) subcommand="$arg"; break ;;
+  esac
+done
+
+# Normalise: daemon-reload -> DAEMON_RELOAD, is-active -> IS_ACTIVE, etc.
+# Use tr for portability (bash 3.2 does not support ${var^^} or ${var,,}).
+key="$(printf '%s' "${subcommand//-/_}" | tr '[:lower:]' '[:upper:]')"
+
+# Look up per-subcommand rc, fall back to generic STUB_RC_SYSTEMCTL, then 0.
+sub_var="STUB_RC_SYSTEMCTL_${key}"
+if [[ -n "${!sub_var+x}" ]]; then
+  exit "${!sub_var}"
+fi
+exit "${STUB_RC_SYSTEMCTL:-0}"
