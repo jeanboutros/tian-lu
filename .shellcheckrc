@@ -1,0 +1,7 @@
+# shellcheck configuration for the tianlu setup scripts.
+
+# Follow `source`/`.` directives into other files during analysis.
+external-sources=true
+
+# Default dialect when a file has no shebang (all our scripts target bash).
+shell=bash

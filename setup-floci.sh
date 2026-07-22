@@ -22,37 +22,47 @@
 #
 # See REVIEW.md for design rationale and challenger review findings.
 
+# CONFIG values below are consumed by phase functions that are implemented
+# incrementally (one unit per commit); until every function lands, some appear
+# unused to shellcheck. This file-wide SC2034 disable is TEMPORARY and is
+# removed in the final unit once all config values are wired in.
+# shellcheck disable=SC2034
+
 set -euo pipefail
 IFS=$'\n\t'
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+#
+# Every scalar parameter uses the `${VAR:-default}` form so tests can inject
+# overrides (e.g. a tmp HOME/root) by exporting the variable before sourcing
+# this script. Values are frozen with `readonly` immediately after.
 
 # --- User ---
-readonly FLOCI_USER="floci"
-readonly FLOCI_HOME="/home/floci"
-readonly FLOCI_SHELL="/bin/bash"
-readonly FLOCI_HOME_PERMS="0700"
+readonly FLOCI_USER="${FLOCI_USER:-floci}"
+readonly FLOCI_HOME="${FLOCI_HOME:-/home/floci}"
+readonly FLOCI_SHELL="${FLOCI_SHELL:-/bin/bash}"
+readonly FLOCI_HOME_PERMS="${FLOCI_HOME_PERMS:-0700}"
 
 # --- Rootless Podman ---
-readonly SUBUID_START="100000"
-readonly SUBUID_COUNT="262144"
-readonly PODMAN_NETWORK="floci-net"
+readonly SUBUID_START="${SUBUID_START:-100000}"
+readonly SUBUID_COUNT="${SUBUID_COUNT:-262144}"
+readonly PODMAN_NETWORK="${PODMAN_NETWORK:-floci-net}"
 
 # --- Floci image ---
-readonly FLOCI_IMAGE="floci/floci:1.5.33-compat"
+readonly FLOCI_IMAGE="${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
 
 # --- Floci configuration ---
-readonly FLOCI_HOSTNAME="tianlu-floci"
-readonly FLOCI_BASE_URL="https://tianlu-floci:4566"
-readonly FLOCI_DEFAULT_REGION="eu-west-1"
-readonly FLOCI_DEFAULT_ACCOUNT_ID="000000000000"
-readonly FLOCI_STORAGE_MODE="persistent"
-readonly FLOCI_STORAGE_PERSISTENT_PATH="/app/data"
-readonly FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOME}/floci-data"
-readonly FLOCI_TLS_ENABLED="true"
-readonly FLOCI_TLS_SELF_SIGNED="true"
+readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"
+readonly FLOCI_BASE_URL="${FLOCI_BASE_URL:-https://tianlu-floci:4566}"
+readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-1}"
+readonly FLOCI_DEFAULT_ACCOUNT_ID="${FLOCI_DEFAULT_ACCOUNT_ID:-000000000000}"
+readonly FLOCI_STORAGE_MODE="${FLOCI_STORAGE_MODE:-persistent}"
+readonly FLOCI_STORAGE_PERSISTENT_PATH="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+readonly FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOST_PERSISTENT_PATH:-${FLOCI_HOME}/floci-data}"
+readonly FLOCI_TLS_ENABLED="${FLOCI_TLS_ENABLED:-true}"
+readonly FLOCI_TLS_SELF_SIGNED="${FLOCI_TLS_SELF_SIGNED:-true}"
 
 # --- Ports (container -p mappings) ---
 readonly FLOCI_PORTS_CONTAINER=(
@@ -78,8 +88,8 @@ readonly FLOCI_PORTS_FIREWALL=(
 # Override with --firewall-scope=rfc1918 to open to all RFC1918 ranges.
 # NOTE: If the server's IP changes (e.g. moved to a different network), the
 # firewall rules become stale. Re-run the script to re-detect, or fix a static
-# IP via /etc/netplan/ to avoid this. See docs/design/solution-design.md §9.4.
-FIREWALL_SCOPE="auto"
+# IP via /etc/netplan/ to avoid this. See docs/design/solution-design.md §10.4.
+FIREWALL_SCOPE="${FIREWALL_SCOPE:-auto}"
 UFW_TRUSTED_SUBNETS=()
 readonly UFW_RFC1918_SUBNETS=(
   "10.0.0.0/8"
@@ -88,11 +98,11 @@ readonly UFW_RFC1918_SUBNETS=(
 )
 
 # --- Paths ---
-readonly FLOCI_ENV_DIR="${FLOCI_HOME}/.config/floci"
-readonly FLOCI_ENV_FILE="${FLOCI_ENV_DIR}/floci.env"
-readonly FLOCI_DATA_DIR="${FLOCI_HOME}/floci-data"
-readonly SYSTEMD_USER_DIR="${FLOCI_HOME}/.config/systemd/user"
-readonly FLOCI_SERVICE_FILE="${SYSTEMD_USER_DIR}/floci.service"
+readonly FLOCI_ENV_DIR="${FLOCI_ENV_DIR:-${FLOCI_HOME}/.config/floci}"
+readonly FLOCI_ENV_FILE="${FLOCI_ENV_FILE:-${FLOCI_ENV_DIR}/floci.env}"
+readonly FLOCI_DATA_DIR="${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}"
+readonly SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-${FLOCI_HOME}/.config/systemd/user}"
+readonly FLOCI_SERVICE_FILE="${FLOCI_SERVICE_FILE:-${SYSTEMD_USER_DIR}/floci.service}"
 
 # --- Interactive mode ---
 # When --interactive is set and stdin is a TTY, the script pauses at each
@@ -100,7 +110,7 @@ readonly FLOCI_SERVICE_FILE="${SYSTEMD_USER_DIR}/floci.service"
 # curl output after the service starts, checking user creation, etc.).
 # Without --interactive, or when stdin is not a TTY, all phases run
 # continuously.
-INTERACTIVE="false"
+INTERACTIVE="${INTERACTIVE:-false}"
 
 # ============================================================================
 # PHASES
@@ -118,10 +128,19 @@ INTERACTIVE="false"
 # FUNCTIONS
 # ============================================================================
 
-# (Implementation pending approval.)
+# (Phase functions are implemented incrementally, one unit per commit.)
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-echo "setup-floci.sh — skeleton pending implementation."
+# main: entry point. Phase wiring is added in the final unit; for now this is
+# a placeholder so the script is runnable and sourceable for tests.
+main() {
+  echo "setup-floci.sh — implementation in progress."
+}
+
+# Only run main when executed directly, not when sourced (e.g. by bats tests).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

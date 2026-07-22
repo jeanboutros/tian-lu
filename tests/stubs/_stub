@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# Generic logging stub for external commands used in bats tests.
+#
+# Each command under test (podman, systemctl, ufw, ...) is a symlink in
+# tests/stubs/bin/ pointing here. The invoked name is basename "$0".
+#
+# Behaviour is controlled entirely by environment variables so individual
+# tests can shape it without editing this file:
+#   STUB_LOG          if set, append "<name> <args...>" to this file
+#   STUB_RC_<NAME>    exit code for command <NAME> (default 0)
+#   STUB_OUT_<NAME>   text written to stdout for command <NAME>
+#
+# <NAME> is the command name upper-cased with non-alphanumerics turned into
+# underscores, e.g. `apparmor_parser` -> STUB_RC_APPARMOR_PARSER.
+set -u
+
+name="$(basename "$0")"
+key="${name//[^a-zA-Z0-9]/_}"
+key="${key^^}"
+
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf '%s %s\n' "$name" "$*" >>"$STUB_LOG"
+fi
+
+out_var="STUB_OUT_${key}"
+if [[ -n "${!out_var:-}" ]]; then
+  printf '%s\n' "${!out_var}"
+fi
+
+rc_var="STUB_RC_${key}"
+exit "${!rc_var:-0}"

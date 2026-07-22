@@ -35,10 +35,20 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 ## Script conventions
 
 - `set -euo pipefail` + `IFS=$'\n\t'` — fail fast.
-- All parameters are `readonly` in a single configuration block at the top.
+- All parameters are `readonly` in a single configuration block at the top, using the `readonly VAR="${VAR:-default}"` form so tests can inject overrides (e.g. a tmp `HOME`/root) before sourcing.
 - Each phase is a separate small function with pydoc-style documentation.
 - Every function must be idempotent (check before create/modify).
 - Privilege model: root/sudo for setup steps (useradd, apt, ufw), then drop to `floci` user for Podman/systemd --user operations via a `run_as_floci` helper that sets `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`.
+
+## Testing
+
+Local tests run on macOS; the Ubuntu-only runtime (Podman/systemd/UFW) is mocked.
+
+- `make lint` — `shellcheck` + `bash -n` on `setup-floci.sh`.
+- `make test` — `bats` unit tests in `tests/`. External commands (`podman`, `systemctl`, `loginctl`, `ufw`, `apt-get`, `useradd`, `passwd`, `openssl`, `curl`, `apparmor_parser`, …) are replaced by logging stubs on `PATH` (`tests/stubs/bin/`), so tests assert *what the script would run* and drive idempotency branches.
+- `make check` — both. Requires `shellcheck` and `bats-core` (`brew install shellcheck bats-core`).
+- The script is **sourceable** (guarded `main` at the bottom: `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi`) so bats can load functions without executing them.
+- Runtime behaviour that cannot be mocked is covered by a server integration checklist (see `docs/design/gaps-register.md`).
 
 ## Target environment
 
