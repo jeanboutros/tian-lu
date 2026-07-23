@@ -53,8 +53,14 @@ base:
 # (the installer runs from there) and a host evidence dir read-write at
 # /opt/twin-evidence. The host evidence path is OUTSIDE the repo (default
 # ~/.cache/tianlu-twin/evidence) so evidence never enters git.
+#
+# The repo location is overridden at create time via a yq expression
+# (--set='.mounts[0].location="<abs path>"'); there is no builtin template
+# variable for an arbitrary host path, so the orchestrator must pass it.
+# The default below is a placeholder absolute path that keeps
+# `limactl validate` happy and is always overridden in practice.
 mounts:
-- location: "{{.Dir}}/.."
+- location: "/Users/placeholder/tianlu"
   mountPoint: /opt/tianlu
   writable: false
 - location: "{{.Home}}/.cache/tianlu-twin/evidence"
