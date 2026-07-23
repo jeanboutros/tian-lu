@@ -182,10 +182,22 @@ _source_and_run() {
   grep -q "EnvironmentFile=%h/.config/floci/floci.env" "$FLOCI_QUADLET_FILE"
 }
 
-@test "write_quadlet_unit file contains ReadWritePaths with both %h and %t" {
+@test "write_quadlet_unit file does NOT contain filesystem-sandbox directives (rootless userns)" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "ReadWritePaths=%h %t" "$FLOCI_QUADLET_FILE"
+  # ProtectSystem, ReadWritePaths, PrivateTmp, ProtectKernelTunables,
+  # PrivateDevices, ProtectKernelModules, ProtectControlGroups are all
+  # excluded — they trigger systemd-executor's implicit userns or capability
+  # drops that AppArmor denies in a rootless user unit.
+  run grep -E "ProtectSystem=|ReadWritePaths=|PrivateTmp=|ProtectKernelTunables=|PrivateDevices=|ProtectKernelModules=|ProtectControlGroups=" "$FLOCI_QUADLET_FILE"
+  [ "$status" -ne 0 ]
+  # The seccomp-based subset that does NOT require namespace creation is kept.
+  grep -q "NoNewPrivileges=true" "$FLOCI_QUADLET_FILE"
+  grep -q "RestrictAddressFamilies=" "$FLOCI_QUADLET_FILE"
+  grep -q "LockPersonality=true" "$FLOCI_QUADLET_FILE"
+  grep -q "RestrictRealtime=true" "$FLOCI_QUADLET_FILE"
+  grep -q "RestrictSUIDSGID=true" "$FLOCI_QUADLET_FILE"
+  grep -q "SystemCallArchitectures=native" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file does not contain ProtectHome" {

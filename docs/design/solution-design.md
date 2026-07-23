@@ -160,22 +160,23 @@ Quadlet-generated units are **transient** and cannot be `systemctl enable`d (sys
 
 **`[Service]` hardening** (applied to the generated unit):
 
-`NoNewPrivileges`, `ProtectSystem=strict`, **`ReadWritePaths=%h %t`**, `PrivateTmp`, `ProtectKernelTunables`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops.
+`NoNewPrivileges`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops. Only the seccomp-based directives are kept — they do not require namespace creation.
 
-`PrivateDevices`, `ProtectKernelModules`, and `ProtectControlGroups` are excluded: in a rootless user unit the first two drop capabilities (`CAP_MKNOD`/`CAP_SYS_RAWIO`, `CAP_SYS_MODULE`) via `PR_CAPBSET_DROP`, which requires `CAP_SETPCAP` the unprivileged user lacks when systemd's implicit user-namespace setup is unavailable (e.g. under AppArmor `apparmor_restrict_unprivileged_userns`) — the service then exits with `status=218/CAPABILITIES`. `ProtectControlGroups` is documented system-service-only in systemd 259 and conflicts with Podman's cgroup management. `MemoryDenyWriteExecute` is excluded (JVM JIT) and `RestrictNamespaces` is excluded (Podman needs namespace creation).
-
-- **`ReadWritePaths` must include `%t`, not only `%h`.** Under `ProtectSystem=strict` the filesystem is read-only except the listed paths. The Podman runtime and the mounted socket live under `/run/user/<UID>` (`%t`); omitting it makes the socket read-only and the container fails to start.
+The filesystem-sandbox directives (`ProtectSystem=strict`, `ReadWritePaths`, `PrivateTmp`, `ProtectKernelTunables`) are excluded: under systemd 259 they make `systemd-executor` create an IMPLICIT user namespace to set up the sandbox, and on Ubuntu 26.04 with `apparmor_restrict_unprivileged_userns=1` AppArmor's `unprivileged_userns` sandbox (no `userns` grant for `systemd-executor`) denies `cap_sys_admin` → `cannot clone: Operation not permitted` → the service fails to start. `PrivateDevices` and `ProtectKernelModules` drop capabilities (`CAP_MKNOD`/`CAP_SYS_RAWIO`, `CAP_SYS_MODULE`) via `PR_CAPBSET_DROP`, which requires `CAP_SETPCAP` the unprivileged user lacks → `status=218/CAPABILITIES`. `ProtectControlGroups` is documented system-service-only in systemd 259 and conflicts with Podman's cgroup management. `MemoryDenyWriteExecute` is excluded (JVM JIT) and `RestrictNamespaces` is excluded (Podman needs namespace creation).
 
 **Directives that must NOT be set** (each breaks rootless Podman or the JVM):
 
 - `MemoryDenyWriteExecute` — Floci is JVM-based and needs write+execute memory pages.
 - `RestrictNamespaces` — Podman must create namespaces for rootless containers.
-- `ProtectHome` — masks `/home` entirely; `ReadWritePaths` cannot override it. The data dir and env file live under `/home/floci`; rely on `0700` permissions instead.
+- `ProtectHome` — masks `/home` entirely; the data dir and env file live under `/home/floci`; rely on `0700` permissions instead.
 - `PrivateNetwork` — breaks rootless container networking.
+- `ProtectSystem`, `ReadWritePaths`, `PrivateTmp`, `ProtectKernelTunables` — trigger `systemd-executor`'s implicit userns (denied under AppArmor userns restriction).
+- `PrivateDevices`, `ProtectKernelModules` — `PR_CAPBSET_DROP` needs `CAP_SETPCAP` the unprivileged user lacks.
+- `ProtectControlGroups` — systemd 259 system-service-only; conflicts with Podman cgroup management.
 
 Quadlet removes the hand-authored lifecycle plumbing the earlier design carried: no `ExecStartPre` stale-container removal, no `ExecStop`, no `--rm` juggling — `--sdnotify=conmon` handles readiness and Quadlet clears a leftover same-name container on start.
 
-**Manual-unit fallback (Podman < 4.4).** If Quadlet is unavailable, write a plain `floci.service` running `podman run` with `Type=notify`, `--sdnotify=conmon`, and `--cidfile=%t/floci.cid` (so `ExecStop` can `podman stop --cidfile %t/floci.cid`), plus `ExecStartPre=-/usr/bin/podman rm -f tianlu-floci` and the identical hardening block including `ReadWritePaths=%h %t`. This is a fallback only; Quadlet is preferred.
+**Manual-unit fallback (Podman < 4.4).** If Quadlet is unavailable, write a plain `floci.service` running `podman run` with `Type=notify`, `--sdnotify=conmon`, and `--cidfile=%t/floci.cid` (so `ExecStop` can `podman stop --cidfile %t/floci.cid`), plus `ExecStartPre=-/usr/bin/podman rm -f tianlu-floci` and the identical seccomp-based hardening block. This is a fallback only; Quadlet is preferred.
 
 ### 9.1 Lingering and user manager readiness
 

@@ -205,14 +205,20 @@ run_as_floci() {
 # %h and %t are Quadlet specifiers expanded at runtime by systemd — they must
 # appear literally in the file and must NOT be shell-expanded here.
 #
-# [Service] hardening is the maximal subset safe for a ROOTLESS user unit.
-# PrivateDevices, ProtectKernelModules, and ProtectControlGroups are excluded:
-# the first two drop capabilities (CAP_MKNOD/CAP_SYS_RAWIO, CAP_SYS_MODULE)
-# via PR_CAPBSET_DROP, which needs CAP_SETPCAP that an unprivileged user lacks
-# when systemd's implicit user-namespace setup is unavailable (e.g. under
-# AppArmor userns restriction) → exit status 218/CAPABILITIES. ProtectControlGroups
-# is documented system-service-only in systemd 259 and conflicts with Podman's
-# cgroup management. MemoryDenyWriteExecute is excluded (JVM JIT) and
+# [Service] hardening is the maximal subset safe for a ROOTLESS user unit on
+# Ubuntu 26.04 with AppArmor userns restriction. The seccomp-based directives
+# kept here (NoNewPrivileges, RestrictAddressFamilies, LockPersonality,
+# RestrictRealtime, RestrictSUIDSGID, SystemCallArchitectures) do NOT require
+# namespace creation. The filesystem-sandbox directives (ProtectSystem=strict,
+# ReadWritePaths, PrivateTmp, ProtectKernelTunables) are excluded: under
+# systemd 259 they make systemd-executor create an IMPLICIT user namespace to
+# set up the sandbox, and AppArmor's unprivileged_userns sandbox (which has no
+# userns grant for systemd-executor) denies cap_sys_admin → "cannot clone:
+# Operation not permitted" → the service fails to start. PrivateDevices and
+# ProtectKernelModules are excluded for the same userns/CAP_SETPCAP reason
+# (status=218/CAPABILITIES). ProtectControlGroups is documented
+# system-service-only in systemd 259 and conflicts with Podman's cgroup
+# management. MemoryDenyWriteExecute is excluded (JVM JIT) and
 # RestrictNamespaces is excluded (Podman needs namespace creation).
 write_quadlet_unit() {
   run_as_floci mkdir -p "$QUADLET_UNIT_DIR"
@@ -247,10 +253,6 @@ Volume=%h/floci-data:/app/data:z
 
 [Service]
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=%h %t
-PrivateTmp=true
-ProtectKernelTunables=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=true
 RestrictRealtime=true
