@@ -164,7 +164,9 @@ ensure_twin() {
   fi
 
   wait_for_running "$FRESH_BUDGET" || return 1
-  limactl shell "$TWIN_NAME" -- test -d /opt/tianlu && test -d /opt/twin-evidence || {
+  # Wrap guest commands in `bash -c` so the login shell's host-CWD `cd` noise
+  # (the host dir does not exist in the guest) does not break the check.
+  limactl shell "$TWIN_NAME" -- bash -c 'test -d /opt/tianlu && test -d /opt/twin-evidence' || {
     FAIL_REASON='twin mounts missing'
     return 1
   }
