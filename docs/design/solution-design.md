@@ -226,7 +226,7 @@ Adding 5100-5199 to the Floci container's `-p` flags causes a port conflict with
 
 ### 10.4 Firewall
 
-The script defaults to the server's auto-detected LAN `/24` subnet (from `ip -o -f inet addr show` on the default-route interface). An explicit `--firewall-scope=rfc1918` flag opens to all RFC1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) for operators who want broader access.
+The script defaults to the server's auto-detected LAN `/24` subnet. `detect_hostname_and_ip` derives the server IP from the source address of the default route (`ip route get 1.1.1.1`, falling back to `hostname -I`), then zeroes the final octet to form the `/24`. An explicit `--firewall-scope=rfc1918` flag opens to all RFC1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) for operators who want broader access.
 
 With `FLOCI_AUTH_VALIDATE_SIGNATURES=false` (default) AND RFC1918 scope, any host in those ranges has full unauthenticated control of all Floci resources. This is acceptable only on a fully trusted single-tenant network with no guest WiFi, no VPN peers, and no IoT devices on the same subnet. `print_summary` prints the resolved scope and a risk statement on every run.
 

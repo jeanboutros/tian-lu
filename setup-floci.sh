@@ -22,12 +22,6 @@
 #
 # See REVIEW.md for design rationale and challenger review findings.
 
-# CONFIG values below are consumed by phase functions that are implemented
-# incrementally (one unit per commit); until every function lands, some appear
-# unused to shellcheck. This file-wide SC2034 disable is TEMPORARY and is
-# removed in the final unit once all config values are wired in.
-# shellcheck disable=SC2034
-
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -56,6 +50,8 @@ readonly FLOCI_IMAGE="${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
 # --- Floci configuration ---
 readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"
 readonly FLOCI_BASE_URL="${FLOCI_BASE_URL:-https://tianlu-floci:4566}"
+readonly FLOCI_API_PORT="${FLOCI_API_PORT:-4566}"
+readonly FLOCI_HEALTH_PATH="${FLOCI_HEALTH_PATH:-/_floci/init}"
 readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-1}"
 readonly FLOCI_DEFAULT_ACCOUNT_ID="${FLOCI_DEFAULT_ACCOUNT_ID:-000000000000}"
 readonly FLOCI_STORAGE_MODE="${FLOCI_STORAGE_MODE:-persistent}"
@@ -118,6 +114,10 @@ readonly MIN_UBUNTU_VERSION="${MIN_UBUNTU_VERSION:-24.04}"
 # --- Systemd user manager poll ---
 readonly USER_MANAGER_POLL_TRIES="${USER_MANAGER_POLL_TRIES:-30}"
 readonly USER_MANAGER_POLL_SLEEP="${USER_MANAGER_POLL_SLEEP:-1}"
+
+# --- Health check poll ---
+readonly HEALTH_POLL_TRIES="${HEALTH_POLL_TRIES:-30}"
+readonly HEALTH_POLL_SLEEP="${HEALTH_POLL_SLEEP:-2}"
 
 # --- XDG runtime dir base ---
 readonly XDG_RUNTIME_BASE="${XDG_RUNTIME_BASE:-/run/user}"
@@ -206,6 +206,13 @@ write_quadlet_unit() {
     run_as_floci cp "$FLOCI_QUADLET_FILE" "${FLOCI_QUADLET_FILE}.bak"
   fi
 
+  local publish_ports=""
+  local p
+  for p in "${FLOCI_PORTS_CONTAINER[@]}"; do
+    publish_ports="${publish_ports}PublishPort=${p}"$'\n'
+  done
+  publish_ports="${publish_ports%$'\n'}"
+
   run_as_floci tee "${FLOCI_QUADLET_FILE}.tmp" >/dev/null <<EOF
 [Unit]
 Description=Floci (AWS emulator) rootless container
@@ -219,9 +226,7 @@ Image=${FLOCI_IMAGE}
 ContainerName=${FLOCI_HOSTNAME}
 Network=${PODMAN_NETWORK}
 EnvironmentFile=%h/.config/floci/floci.env
-PublishPort=4566:4566
-PublishPort=6379-6399:6379-6399
-PublishPort=7001-7099:7001-7099
+${publish_ports}
 Volume=%t/podman/podman.sock:/var/run/docker.sock:z
 Volume=%h/floci-data:/app/data:z
 
@@ -733,16 +738,161 @@ EOF
   run_as_floci mv -f "${FLOCI_ENV_FILE}.tmp" "$FLOCI_ENV_FILE"
 }
 
-# (Phase functions are implemented incrementally, one unit per commit.)
+# ----------------------------------------------------------------------------
+# Phase 6 functions
+# ----------------------------------------------------------------------------
+
+# phase_pause: in --interactive mode, pause at a phase boundary so the
+# operator can inspect state between phases. Self-disables whenever it would
+# otherwise block: when not interactive, and when stdin is not a TTY (e.g.
+# under bats or any non-interactive invocation) so it can never hang a run.
+phase_pause() {
+  [[ "$INTERACTIVE" == "true" ]] || return 0
+  [[ -t 0 ]] || return 0
+  read -r -p "Press Enter to continue..." _ || true
+}
+
+# configure_firewall: resolve the trusted-subnet allowlist and add idempotent
+# UFW allow rules for the Floci ports (§10.4).
+#
+# UFW itself is never enabled here — enabling it could lock the operator out
+# of their own SSH session if their access rule is missing. The operator must
+# have already enabled UFW (with their own SSH allowed) and set a default-deny
+# INPUT policy before running this script; both are asserted, not fixed up.
+configure_firewall() {
+  case "$FIREWALL_SCOPE" in
+    rfc1918)
+      UFW_TRUSTED_SUBNETS=("${UFW_RFC1918_SUBNETS[@]}")
+      ;;
+    *)
+      if [[ -z "${SERVER_LAN_SUBNET:-}" ]]; then
+        printf 'ERROR: SERVER_LAN_SUBNET is not set — detect_hostname_and_ip must run first\n' >&2
+        exit 1
+      fi
+      UFW_TRUSTED_SUBNETS=("$SERVER_LAN_SUBNET")
+      ;;
+  esac
+
+  local status
+  status="$(ufw status verbose 2>/dev/null || true)"
+
+  if ! printf '%s\n' "$status" | grep -q 'Status: active'; then
+    printf 'ERROR: UFW is not active — enable it (with your SSH rule allowed) before running this script: sudo ufw allow OpenSSH && sudo ufw enable\n' >&2
+    exit 1
+  fi
+
+  if ! printf '%s\n' "$status" | grep -qE 'Default: (deny|reject) \(incoming\)'; then
+    printf 'ERROR: UFW default INPUT policy must be deny or reject — set it with: sudo ufw default deny incoming (see design §10.4)\n' >&2
+    exit 1
+  fi
+
+  local subnet port
+  for subnet in "${UFW_TRUSTED_SUBNETS[@]}"; do
+    for port in "${FLOCI_PORTS_FIREWALL[@]}"; do
+      if printf '%s\n' "$status" | grep -E "(^|[[:space:]])${port}/" | grep -qF "$subnet"; then
+        continue
+      fi
+      ufw allow from "$subnet" to any port "$port" proto tcp
+    done
+  done
+}
+
+# verify_health: poll the Floci health endpoint until it returns HTTP 200,
+# per §15.1. HTTP 200 = ready; 000 (connection refused/timeout) = not yet
+# started, retry; any other code = error, fail immediately.
+verify_health() {
+  local i code
+  for (( i=1; i<=HEALTH_POLL_TRIES; i++ )); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+      --resolve "${FLOCI_HOSTNAME}:${FLOCI_API_PORT}:127.0.0.1" \
+      --connect-timeout 5 --max-time 10 \
+      -k "https://${FLOCI_HOSTNAME}:${FLOCI_API_PORT}${FLOCI_HEALTH_PATH}")" || code=000
+    case "$code" in
+      200) return 0 ;;
+      000) sleep "$HEALTH_POLL_SLEEP" ;;
+      *)   printf 'ERROR: health check failed (HTTP %s)\n' "$code" >&2; exit 1 ;;
+    esac
+  done
+  printf 'ERROR: health check timed out after %s tries\n' "$HEALTH_POLL_TRIES" >&2
+  exit 1
+}
+
+# ----------------------------------------------------------------------------
+# Phase 7 functions
+# ----------------------------------------------------------------------------
+
+# print_summary: final report — resolved firewall scope, a risk statement
+# (Floci is unauthenticated by default; self-signed TLS is encryption, not
+# authentication), connection info, and on-disk locations.
+print_summary() {
+  echo "================================================================"
+  echo "Floci setup complete."
+  echo "================================================================"
+  echo
+  echo "Firewall scope: ${FIREWALL_SCOPE}"
+  echo "Trusted subnets: ${UFW_TRUSTED_SUBNETS[*]:-}"
+  echo
+  echo "RISK: Floci is UNAUTHENTICATED by default (FLOCI_AUTH_VALIDATE_SIGNATURES=false)."
+  echo "Any host within the trusted subnet(s) above has full control of all Floci"
+  echo "resources. Self-signed TLS provides encryption only, NOT authentication."
+  echo "Only run this on a fully trusted network (see docs/design/solution-design.md §10.4)."
+  echo
+  echo "Connection URL: ${FLOCI_BASE_URL}"
+  echo "TLS is self-signed — clients must disable certificate verification"
+  echo "(e.g. AWS CLI/SDK: --no-verify-ssl / verify=False)."
+  echo
+  echo "Data directory: ${FLOCI_DATA_DIR}"
+  echo "Env file:       ${FLOCI_ENV_FILE}"
+}
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-# main: entry point. Phase wiring is added in the final unit; for now this is
-# a placeholder so the script is runnable and sourceable for tests.
 main() {
-  echo "setup-floci.sh — implementation in progress."
+  parse_args "$@"
+
+  # Phase 1: Preflight
+  assert_root_or_sudo
+  assert_ubuntu_version
+  assert_userns_allowed
+  detect_hostname_and_ip
+  phase_pause
+
+  # Phase 2: User setup
+  create_floci_user
+  lock_floci_password
+  configure_subuid_subgid
+  phase_pause
+
+  # Phase 3: Podman setup
+  install_podman
+  enable_lingering
+  configure_xdg_runtime_dir
+  start_podman_socket
+  phase_pause
+
+  # Phase 4: Network & image
+  create_podman_network
+  pull_floci_image
+  phase_pause
+
+  # Phase 5: Floci config
+  create_data_directory
+  add_hosts_entry
+  generate_presign_secret
+  write_env_file
+  write_quadlet_unit
+  phase_pause
+
+  # Phase 6: Start & verify
+  enable_systemd_service
+  configure_firewall
+  verify_health
+  phase_pause
+
+  # Phase 7: Summary
+  print_summary
 }
 
 # Only run main when executed directly, not when sourced (e.g. by bats tests).

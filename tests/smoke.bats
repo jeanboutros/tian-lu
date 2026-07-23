@@ -33,7 +33,13 @@ teardown() {
 }
 
 @test "executing the script runs main" {
+  # Running as non-root now hits assert_root_or_sudo (the first Phase 1
+  # check main() reaches) and exits non-zero with a root/sudo error on
+  # stderr, instead of the old placeholder echo. STUB_OUT_ID is forced to a
+  # non-zero UID so `id -u` deterministically reports "not root" regardless
+  # of the UID bats itself is actually running as.
+  export STUB_OUT_ID="1000"
   run bash "${SCRIPT}"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"implementation in progress"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"root"* || "$output" == *"sudo"* ]]
 }
