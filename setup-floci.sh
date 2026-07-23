@@ -250,6 +250,14 @@ EnvironmentFile=%h/.config/floci/floci.env
 ${publish_ports}
 Volume=%t/podman/podman.sock:/var/run/docker.sock:z
 Volume=%h/floci-data:/app/data:z
+# UserNS keep-id:uid=1001,gid=1001 — the Floci image runs as container uid
+# 1001 (gid 0); rootless Podman's default subuid mapping maps host floci
+# (1000) to container root (0), so a host bind mount of /home/floci/floci-data
+# is root-owned inside the container and the container's floci user (1001)
+# cannot write to /app/data (java.nio.file.AccessDeniedException: /app/data/tls).
+# keep-id:uid=1001,gid=1001 maps host floci (1000) to container floci (1001),
+# keeping the host dir owned by floci while making it writable inside.
+UserNS=keep-id:uid=1001,gid=1001
 
 [Service]
 NoNewPrivileges=true

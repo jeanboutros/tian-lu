@@ -155,6 +155,7 @@ Quadlet-generated units are **transient** and cannot be `systemctl enable`d (sys
 | `PublishPort` | `4566:4566`, `6379-6399:6379-6399`, `7001-7099:7001-7099` | proxy-in-Floci ports |
 | `Volume` | `%t/podman/podman.sock:/var/run/docker.sock:z` | rootless Podman socket, for sidecar spawning |
 | `Volume` | `%h/floci-data:/app/data:z` | persistent storage |
+| `UserNS` | `keep-id:uid=1001,gid=1001` | the Floci image runs as container uid 1001; without this, rootless Podman's default subuid mapping makes the host bind mount root-owned inside, so the container's `floci` user cannot write `/app/data` → `AccessDeniedException: /app/data/tls` |
 
 `%h` = the user's home (`/home/floci`), `%t` = the runtime dir (`/run/user/<UID>`); Quadlet expands both. The `.container` also sets `After=podman.socket` and `Requires=podman.socket` in its `[Unit]` section — Quadlet does **not** add this automatically, and the socket must be active before the container starts (the mounted `%t/podman/podman.sock` must exist). `podman.socket` is a user-scoped unit enabled separately in Phase 3.
 

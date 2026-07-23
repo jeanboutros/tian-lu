@@ -176,6 +176,12 @@ _source_and_run() {
   grep -q "Volume=%h/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
 }
 
+@test "write_quadlet_unit file contains UserNS keep-id mapping for the Floci image user" {
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "UserNS=keep-id:uid=1001,gid=1001" "$FLOCI_QUADLET_FILE"
+}
+
 @test "write_quadlet_unit file contains EnvironmentFile with %h specifier" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
