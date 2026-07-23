@@ -408,6 +408,28 @@ teardown() {
   [[ "$output" == *"could not detect server IP"* ]]
 }
 
+@test "detect_hostname_and_ip: ip route failure falls through to hostname -I (no set -e abort)" {
+  run _run_fn \
+    "export STUB_RC_IP=2;
+     export STUB_OUT_IP='';
+     export STUB_OUT_HOSTNAME='192.168.5.10 10.0.0.1'" \
+    "detect_hostname_and_ip; printf 'SERVER_IP=%s\n' \"\$SERVER_IP\"; printf 'SERVER_LAN_SUBNET=%s\n' \"\$SERVER_LAN_SUBNET\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SERVER_IP=192.168.5.10"* ]]
+  [[ "$output" == *"SERVER_LAN_SUBNET=192.168.5.0/24"* ]]
+}
+
+@test "detect_hostname_and_ip: both ip and hostname failing exits with the explicit error (not a bare abort)" {
+  run _run_fn \
+    "export STUB_RC_IP=2;
+     export STUB_OUT_IP='';
+     export STUB_RC_HOSTNAME=1;
+     export STUB_OUT_HOSTNAME=''" \
+    "detect_hostname_and_ip"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not detect server IP"* ]]
+}
+
 # ===========================================================================
 # lock_floci_password (additional cases)
 # ===========================================================================

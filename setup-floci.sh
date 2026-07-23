@@ -407,11 +407,11 @@ detect_hostname_and_ip() {
   # Primary: extract the token after "src" from the ip-route output using awk
   # (awk does its own whitespace splitting, immune to global IFS=$'\n\t').
   SERVER_IP="$(ip route get 1.1.1.1 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
 
   # Fallback: first field from hostname -I (also via awk for IFS-safety).
   if [[ -z "$SERVER_IP" ]]; then
-    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   fi
 
   if [[ -z "$SERVER_IP" ]]; then
