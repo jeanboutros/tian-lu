@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Stub for sudo used by run_as_floci in bats tests.
+#
+# Logs the full invocation to $STUB_LOG with a "sudo " prefix, then strips
+# the leading "-u <user>" flag, a known set of sudo option flags (-n -E -H
+# -i -s -A -b -k), and a leading "env VAR=VAL..." prefix, so the underlying
+# stubbed command (e.g. systemctl, mkdir, tee) still runs transparently and
+# gets its own log entry. Stdin is passed through so callers that pipe into
+# the underlying command work correctly.
+set -euo pipefail
+
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf 'sudo %s\n' "$*" >>"$STUB_LOG"
+fi
+
+# Strip leading "-u <user>" (sudo's user-selection flag).
+if [[ "${1:-}" == "-u" ]]; then
+  shift 2
+fi
+
+# Strip a known set of sudo option flags only — do NOT use a greedy
+# "anything starting with -" loop which would swallow real command flags.
+# Recognise only flags that sudo itself defines (single-char, no argument).
+_sudo_known_flag() {
+  case "${1:-}" in
+    -n|-E|-H|-i|-s|-A|-b|-k) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+while _sudo_known_flag "${1:-}"; do
+  shift
+done
+unset -f _sudo_known_flag
+
+# Strip a leading "env" followed by zero or more VAR=VAL assignments.
+if [[ "${1:-}" == "env" ]]; then
+  shift
+  while [[ "${1:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+    shift
+  done
+fi
+
+# Strip a leading "--" separator if present.
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+# Execute the remaining command (the underlying stub) with stdin preserved.
+exec "$@"
