@@ -1,1 +1,104 @@
-../_stub
+#!/usr/bin/env bash
+#
+# Dedicated podman stub for bats tests.
+#
+# Logs the full invocation to $STUB_LOG, then resolves the exit code based on
+# the subcommand.  For multi-word subcommands (network, image, system,
+# container, volume, secret, pod, machine) the first TWO non-flag tokens form
+# the key (e.g. "network create" -> NETWORK_CREATE).  For single-word
+# subcommands the first non-flag token is used alone (e.g. "pull" -> PULL).
+#
+# Key derivation (upper-case, non-alnum -> _):
+#   podman network inspect ... -> key NETWORK_INSPECT
+#   podman image inspect ...   -> key IMAGE_INSPECT
+#   podman pull ...            -> key PULL
+#
+# Per-subcommand rc variables:
+#   STUB_RC_PODMAN_NETWORK_INSPECT    default: STUB_RC_PODMAN, else 0
+#   STUB_RC_PODMAN_NETWORK_CREATE     default: STUB_RC_PODMAN, else 0
+#   STUB_RC_PODMAN_IMAGE_INSPECT      default: STUB_RC_PODMAN, else 0
+#   STUB_RC_PODMAN_PULL               default: STUB_RC_PODMAN, else 0
+#   ... (any subcommand-derived key)
+#
+# STUB_OUT_PODMAN is honoured for stdout if set.
+#
+# Value-taking global flags whose argument token is skipped during subcommand
+# scan (so "podman --log-level debug network create" still keys NETWORK_CREATE):
+#   --url --log-level --connection --identity --root --runroot
+#   --storage-driver --storage-opt --module --cdi-spec-dir --tmpdir
+#   --network-cmd-path --conmon --runtime
+set -u
+
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf 'podman %s\n' "$*" >>"$STUB_LOG"
+fi
+
+# Emit any configured stdout output.
+if [[ -n "${STUB_OUT_PODMAN:-}" ]]; then
+  printf '%s\n' "${STUB_OUT_PODMAN}"
+fi
+
+# Multi-word subcommand prefixes.
+_podman_is_multi() {
+  case "$1" in
+    network|image|system|container|volume|secret|pod|machine) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Returns true if the given flag takes a separate space-separated value token.
+# --flag=value form is a single token starting with '-' and is already skipped.
+_podman_is_value_flag() {
+  case "$1" in
+    --url|--log-level|--connection|--identity|--root|--runroot| \
+    --storage-driver|--storage-opt|--module|--cdi-spec-dir|--tmpdir| \
+    --network-cmd-path|--conmon|--runtime) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Collect the first two non-flag tokens from "$@", skipping the value token
+# that follows any known value-taking global flag.
+first=""
+second=""
+skip_next=0
+for arg in "$@"; do
+  if [[ "$skip_next" -eq 1 ]]; then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    -*)
+      if _podman_is_value_flag "$arg"; then
+        skip_next=1
+      fi
+      ;;
+    *)
+      if [[ -z "$first" ]]; then
+        first="$arg"
+      elif [[ -z "$second" ]]; then
+        second="$arg"
+        break
+      fi
+      ;;
+  esac
+done
+
+# Build the key: combine first+second for multi-word subcommands, else first.
+if _podman_is_multi "$first" && [[ -n "$second" ]]; then
+  raw="${first}_${second}"
+else
+  raw="$first"
+fi
+unset -f _podman_is_multi _podman_is_value_flag
+
+# Upper-case and replace non-alnum with _.
+# tr for bash-3.2 portability (no ${var^^}).
+key="$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+
+# Resolve rc: per-subcommand var -> STUB_RC_PODMAN -> 0.
+sub_var="STUB_RC_PODMAN_${key}"
+if [[ -n "${!sub_var+x}" ]]; then
+  exit "${!sub_var}"
+fi
+exit "${STUB_RC_PODMAN:-0}"

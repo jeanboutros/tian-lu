@@ -182,16 +182,15 @@ After `loginctl enable-linger floci`, the user manager starts asynchronously. Th
 ```bash
 uid=$(id -u floci)
 for ((i=1; i<=30; i++)); do
-  if systemctl is-active --quiet "user@${uid}.service"; then
-    if systemctl --user -M "floci@.host" is-active --quiet default.target 2>/dev/null; then
-      break
-    fi
+  if systemctl is-active --quiet "user@${uid}.service" \
+     && run_as_floci systemctl --user is-active --quiet default.target; then
+    break
   fi
   sleep 1
 done
 ```
 
-`user@<UID>.service` (system scope) returns `active` as soon as the user manager process is up, regardless of `degraded` state. `default.target` (user scope) confirms the manager reached its default target. `is-active` is used instead of `is-system-running` to avoid false failures when any unrelated user unit has failed.
+`user@<UID>.service` (system scope, queried as root) returns `active` as soon as the user manager process is up, regardless of `degraded` state. The user-scope `default.target` check goes through `run_as_floci` — the same privilege-drop helper used everywhere else — so it inherits the correct `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` and confirms the manager reached its default target. `is-active` is used instead of `is-system-running` to avoid false failures when any unrelated user unit has failed. The poll count and per-iteration sleep are configurable so the sleep can be stubbed out under test.
 
 ## 10. Port mapping
 

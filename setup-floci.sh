@@ -108,6 +108,13 @@ readonly FLOCI_QUADLET_FILE="${FLOCI_QUADLET_FILE:-${QUADLET_UNIT_DIR}/floci.con
 readonly OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 readonly MIN_UBUNTU_VERSION="${MIN_UBUNTU_VERSION:-24.04}"
 
+# --- Systemd user manager poll ---
+readonly USER_MANAGER_POLL_TRIES="${USER_MANAGER_POLL_TRIES:-30}"
+readonly USER_MANAGER_POLL_SLEEP="${USER_MANAGER_POLL_SLEEP:-1}"
+
+# --- XDG runtime dir base ---
+readonly XDG_RUNTIME_BASE="${XDG_RUNTIME_BASE:-/run/user}"
+
 # --- AppArmor / userns ---
 readonly USERNS_SYSCTL_FILE="${USERNS_SYSCTL_FILE:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
 readonly APPARMOR_PROFILES_FILE="${APPARMOR_PROFILES_FILE:-/sys/kernel/security/apparmor/profiles}"
@@ -498,6 +505,99 @@ configure_subuid_subgid() {
 
     printf '%s:%d:%d\n' "$FLOCI_USER" "$candidate" "$SUBUID_COUNT" >>"$map_file"
   done
+}
+
+# ----------------------------------------------------------------------------
+# Phase 3 functions
+# ----------------------------------------------------------------------------
+
+# install_podman: idempotent — skip if podman is already on PATH.
+install_podman() {
+  if command -v podman >/dev/null 2>&1; then
+    return 0
+  fi
+  apt-get update
+  apt-get install -y podman uidmap
+}
+
+# enable_lingering: enable systemd lingering for $FLOCI_USER and wait for the
+# user manager to reach default.target (two-stage poll per §9.1).
+enable_lingering() {
+  local uid
+  uid="$(id -u "$FLOCI_USER")"
+
+  # Idempotency: skip enable if linger is already on.
+  local linger_out
+  linger_out="$(loginctl show-user "$FLOCI_USER" --property=Linger 2>/dev/null || true)"
+  if printf '%s\n' "$linger_out" | grep -q 'Linger=yes'; then
+    : # already enabled — fall through to the readiness poll
+  else
+    loginctl enable-linger "$FLOCI_USER"
+  fi
+
+  # Two-stage readiness poll (§9.1).
+  local ready=0 i
+  for (( i=1; i<=USER_MANAGER_POLL_TRIES; i++ )); do
+    if systemctl is-active --quiet "user@${uid}.service" \
+       && run_as_floci systemctl --user is-active --quiet default.target; then
+      ready=1; break
+    fi
+    sleep "$USER_MANAGER_POLL_SLEEP"
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    printf 'ERROR: user manager for %s not ready\n' "$FLOCI_USER" >&2
+    exit 1
+  fi
+}
+
+# configure_xdg_runtime_dir: verify the XDG runtime directory exists for
+# $FLOCI_USER.  After lingering + poll it must already exist; its absence is
+# a precondition failure (podman.socket cannot start without it).
+configure_xdg_runtime_dir() {
+  local uid
+  uid="$(id -u "$FLOCI_USER")"
+  local xdg="${XDG_RUNTIME_BASE}/${uid}"
+  if [[ ! -d "$xdg" ]]; then
+    printf 'ERROR: XDG_RUNTIME_DIR %s does not exist\n' "$xdg" >&2
+    exit 1
+  fi
+}
+
+# start_podman_socket: idempotent — enable --now only if the socket is not
+# already active.  podman.socket is a distro-shipped unit (not a Quadlet
+# transient), so `enable --now` is correct here.
+start_podman_socket() {
+  if run_as_floci systemctl --user is-active --quiet podman.socket; then
+    return 0
+  fi
+  run_as_floci systemctl --user enable --now podman.socket
+}
+
+# ----------------------------------------------------------------------------
+# Phase 4 functions
+# ----------------------------------------------------------------------------
+
+# create_podman_network: idempotent — skip if the named network already exists.
+#
+# Why bare `podman network create "$PODMAN_NETWORK"` (no --subnet / DNS flags)
+# satisfies design §5.2: on netavark-backed Podman (Ubuntu 24.04+), any
+# user-defined (named) network automatically gets aardvark-dns for per-
+# container DNS resolution and assigns reachable IPs by default — unlike the
+# rootless default bridge, which does not.  Hardcoding a --subnet risks range
+# collisions with other networks; netavark's defaults are collision-resistant.
+create_podman_network() {
+  if run_as_floci podman network inspect "$PODMAN_NETWORK" >/dev/null 2>&1; then
+    return 0
+  fi
+  run_as_floci podman network create "$PODMAN_NETWORK"
+}
+
+# pull_floci_image: idempotent — skip if the image is already present locally.
+pull_floci_image() {
+  if run_as_floci podman image inspect "$FLOCI_IMAGE" >/dev/null 2>&1; then
+    return 0
+  fi
+  run_as_floci podman pull "$FLOCI_IMAGE"
 }
 
 # (Phase functions are implemented incrementally, one unit per commit.)
