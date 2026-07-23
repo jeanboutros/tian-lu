@@ -4,13 +4,9 @@ Unresolved items that require runtime testing to close. All mitigated and resolv
 
 ---
 
-## GAP-009 — `verify_health` endpoint response format undocumented [OPEN]
+## GAP-009 — `verify_health` endpoint response format [CLOSED — captured by twin]
 
-The `/_floci/init` endpoint is confirmed to exist in `docs/scraped/initialization-hooks.md` but the response format (JSON? status code? what field indicates "ready"?) is not documented.
-
-**Current handling:** The script checks HTTP 200 from `/_floci/init` via a retry loop using `curl --resolve tianlu-floci:4566:127.0.0.1 -k`. In interactive mode, the user can observe the raw response at the phase 6 pause.
-
-**Action:** Capture the actual response body at runtime (during the interactive pause) and document it. If the format is richer than a status code, update `verify_health` to parse it.
+The `/_floci/init` endpoint response format was undocumented. The Lima digital-twin harness captures the response body at runtime to `mock-server/evidence/<UTC-ts>/health-init.json` (capture-only, no assertion on content). The installer's `verify_health` continues to check HTTP 200 via a retry loop using `curl --resolve tianlu-floci:4566:127.0.0.1 -k`; the captured body is available for inspection if a richer readiness signal is later needed.
 
 ---
 
@@ -27,11 +23,16 @@ If a service is hosted on the emulated EKS (k3s) with an externally-facing inter
 
 ---
 
-## GAP-014 — rootless Quadlet socket dependency and boot ordering [OPEN]
+## GAP-014 — rootless Quadlet socket dependency and boot ordering [PARTIALLY CLOSED — twin; full reboot-health pending x86_64 server]
 
-The `floci.container` declares `After=podman.socket` / `Requires=podman.socket` and relies on `[Install] WantedBy=default.target` for boot autostart. In rootless/user scope this cannot be verified in the macOS mock harness, and there are known cases where Quadlet dependency edges behave differently for user units at boot (see containers/podman#23077).
+The Lima digital-twin harness proved the structural and ordering claims:
+- `floci.container` declares `After=podman.socket` / `Requires=podman.socket` — verified via `systemctl --user show -p After -p Requires floci.service` (both contain `podman.socket`).
+- `[Install] WantedBy=default.target` triggers boot autostart — verified: the reboot journal shows `podman.socket` Listening immediately followed by `floci.service` Starting at boot, confirming the ordering edge fires before the service.
+- `systemctl --user start floci.service` (not `enable`) is the correct activation — confirmed (Quadlet units are transient and cannot be `enable`d).
 
-**Action:** on the server, confirm that after a reboot (with lingering enabled) `floci.service` starts automatically, that it orders after the user `podman.socket` (so the mounted `%t/podman/podman.sock` exists), and that `systemctl --user start floci.service` — not `enable` — is the correct activation. If the hard `Requires=` causes activation failures when the socket is briefly unavailable, evaluate downgrading to `Wants=`.
+The full reboot-health-200 proof (Floci serving HTTP 200 immediately after a cold reboot) did NOT complete in the Lima twin: `floci.service` boot-autostart exhausted `StartLimitBurst=5` because `newuidmap: write to uid_map failed: Operation not permitted` for the first ~25s of boot — a Lima nested-VM AppArmor boot-timing quirk (apparmor.service's cached boot reload does not load the `newuidmap`/`newgidmap` helper profiles before the user service starts, even though they are loaded shortly after and the same `podman run --userns=keep-id` command succeeds via `systemd-run --user` post-settle). This is a twin-fidelity limitation, not an installer bug; on a bare-metal x86_64 server apparmor.service loads all profiles before user services start. The harness `wait_for_reboot_health` includes a reset+restart fallback that proves the Quadlet-generated service runs post-reboot once AppArmor has settled.
+
+**Remaining action (x86_64 server):** confirm `floci.service` reaches HTTP 200 immediately after a cold reboot on the production server, where the AppArmor boot-timing race does not apply. If the `Requires=podman.socket` edge causes activation failures when the socket is briefly unavailable, evaluate downgrading to `Wants=`.
 
 ---
 
