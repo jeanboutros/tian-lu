@@ -173,13 +173,18 @@ INTERACTIVE="${INTERACTIVE:-false}"
 run_as_floci() {
   local uid
   uid="$(id -u "$FLOCI_USER")"
+  # No trailing `--` before "$@": GNU coreutils 9.4 `env` treats
+  # `env VAR=val -- cmd` as if `--` were the command (it only accepts `--`
+  # before VAR=val assignments). Dropping the `--` is portable across GNU
+  # and BSD `env`; sudo's own `--` separator is unnecessary here because no
+  # sudo option follows -u <user>.
   sudo -u "$FLOCI_USER" env \
     HOME="$FLOCI_HOME" \
     USER="$FLOCI_USER" \
     PATH="/usr/local/bin:/usr/bin:/bin" \
     XDG_RUNTIME_DIR="/run/user/${uid}" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-    -- "$@"
+    "$@"
 }
 
 # write_quadlet_unit: render the Quadlet .container file for the Floci service.
