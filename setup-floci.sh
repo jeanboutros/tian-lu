@@ -132,6 +132,8 @@ readonly APPARMOR_USERNS_PROFILE="${APPARMOR_USERNS_PROFILE:-${APPARMOR_PROFILE_
 readonly PODMAN_BIN="${PODMAN_BIN:-/usr/bin/podman}"
 readonly CRUN_BIN="${CRUN_BIN:-/usr/bin/crun}"
 readonly PASTA_BIN="${PASTA_BIN:-/usr/bin/pasta}"
+readonly NEWUIDMAP_BIN="${NEWUIDMAP_BIN:-/usr/bin/newuidmap}"
+readonly NEWGIDMAP_BIN="${NEWGIDMAP_BIN:-/usr/bin/newgidmap}"
 
 # --- Sub{uid,gid} files ---
 readonly SUBUID_FILE="${SUBUID_FILE:-/etc/subuid}"
@@ -425,6 +427,19 @@ assert_userns_allowed() {
   local tmp_profile
   tmp_profile="${APPARMOR_USERNS_PROFILE}.tmp.$$"
 
+  # Helper: append a userns-granting block for a binary if it exists on disk
+  # AND no system profile already grants it userns (avoid conflicting
+  # attachments — see the podman note above). Ubuntu 26.04 ships profiles for
+  # podman/crun/pasta but NOT for newuidmap/newgidmap, so those helpers get a
+  # block; without it, rootless Podman fails at boot with
+  # "newuidmap: write to uid_map failed: Operation not permitted".
+  _append_userns_block() {
+    local bin="$1" name="$2"
+    [[ -f "$bin" ]] || return 0
+    _system_profile_grants_userns "$bin" && return 0
+    printf '\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n' "$name" "$bin" >>"$tmp_profile"
+  }
+
   # Write the mandatory podman block (specifiers literal, not shell-expanded
   # except for the path token in the profile line).
   {
@@ -437,23 +452,11 @@ assert_userns_allowed() {
     printf '}\n'
   } >"$tmp_profile"
 
-  # Optional crun block (only if the binary exists on disk).
-  if [[ -f "$CRUN_BIN" ]]; then
-    {
-      printf '\nprofile podman-userns-crun %s flags=(unconfined) {\n' "$CRUN_BIN"
-      printf '  userns,\n'
-      printf '}\n'
-    } >>"$tmp_profile"
-  fi
-
-  # Optional pasta block.
-  if [[ -f "$PASTA_BIN" ]]; then
-    {
-      printf '\nprofile podman-userns-pasta %s flags=(unconfined) {\n' "$PASTA_BIN"
-      printf '  userns,\n'
-      printf '}\n'
-    } >>"$tmp_profile"
-  fi
+  # Optional blocks for the rest of the rootless-Podman binary chain.
+  _append_userns_block "$CRUN_BIN" "podman-userns-crun"
+  _append_userns_block "$PASTA_BIN" "podman-userns-pasta"
+  _append_userns_block "$NEWUIDMAP_BIN" "newuidmap-userns"
+  _append_userns_block "$NEWGIDMAP_BIN" "newgidmap-userns"
 
   chmod 0644 "$tmp_profile"
   mv -f "$tmp_profile" "$APPARMOR_USERNS_PROFILE"

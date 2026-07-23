@@ -209,6 +209,11 @@ EOF
   [ "$status" -ne 0 ]
   run grep "podman-userns-pasta" "$profile_file"
   [ "$status" -ne 0 ]
+  # newuidmap/newgidmap blocks must NOT be present (binaries don't exist).
+  run grep "newuidmap-userns" "$profile_file"
+  [ "$status" -ne 0 ]
+  run grep "newgidmap-userns" "$profile_file"
+  [ "$status" -ne 0 ]
 
   # HARD PROHIBITION checks.
   # No sysctl call in stub log.
@@ -223,6 +228,32 @@ EOF
   local sysctl_val
   sysctl_val="$(cat "$sysctl_file")"
   [[ "$sysctl_val" == "1" ]]
+}
+
+@test "assert_userns_allowed: installs newuidmap/newgidmap userns blocks when helpers exist" {
+  local sysctl_file="${TEST_TMP}/userns-sysctl"
+  local profile_dir="${TEST_TMP}/apparmor.d"
+  local profile_file="${profile_dir}/podman-userns"
+  local profiles_file="${TEST_TMP}/no-apparmor-profiles"
+  local fake_podman="${TEST_TMP}/podman"
+  local fake_newuidmap="${TEST_TMP}/newuidmap"
+  local fake_newgidmap="${TEST_TMP}/newgidmap"
+  printf '1\n' >"$sysctl_file"
+  touch "$fake_podman" "$fake_newuidmap" "$fake_newgidmap"
+
+  run _run_fn \
+    "export USERNS_SYSCTL_FILE='${sysctl_file}';
+     export APPARMOR_PROFILES_FILE='${profiles_file}';
+     export APPARMOR_PROFILE_DIR='${profile_dir}';
+     export APPARMOR_USERNS_PROFILE='${profile_file}';
+     export PODMAN_BIN='${fake_podman}';
+     export NEWUIDMAP_BIN='${fake_newuidmap}';
+     export NEWGIDMAP_BIN='${fake_newgidmap}'" \
+    "assert_userns_allowed"
+  [ "$status" -eq 0 ]
+  [ -f "$profile_file" ]
+  grep -q "profile newuidmap-userns ${fake_newuidmap}" "$profile_file"
+  grep -q "profile newgidmap-userns ${fake_newgidmap}" "$profile_file"
 }
 
 @test "assert_userns_allowed: profile file contains exact podman block" {
