@@ -104,6 +104,13 @@ readonly FLOCI_DATA_DIR="${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}"
 readonly QUADLET_UNIT_DIR="${QUADLET_UNIT_DIR:-${FLOCI_HOME}/.config/containers/systemd}"
 readonly FLOCI_QUADLET_FILE="${FLOCI_QUADLET_FILE:-${QUADLET_UNIT_DIR}/floci.container}"
 
+# --- /etc/hosts ---
+readonly HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
+
+# --- Docker log rotation (Floci env file) ---
+readonly FLOCI_LOG_MAX_SIZE="${FLOCI_LOG_MAX_SIZE:-10m}"
+readonly FLOCI_LOG_MAX_FILE="${FLOCI_LOG_MAX_FILE:-3}"
+
 # --- OS / preflight ---
 readonly OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 readonly MIN_UBUNTU_VERSION="${MIN_UBUNTU_VERSION:-24.04}"
@@ -598,6 +605,132 @@ pull_floci_image() {
     return 0
   fi
   run_as_floci podman pull "$FLOCI_IMAGE"
+}
+
+# ----------------------------------------------------------------------------
+# Phase 5 functions
+# ----------------------------------------------------------------------------
+
+# create_data_directory: ensure the persistent data dir exists, owned by
+# floci, mode 0700. Idempotent: mkdir -p is a no-op if the dir already
+# exists, and re-applying chmod 0700 is harmless.
+create_data_directory() {
+  run_as_floci mkdir -p "$FLOCI_DATA_DIR"
+  run_as_floci chmod 0700 "$FLOCI_DATA_DIR"
+}
+
+# add_hosts_entry: ensure $HOSTS_FILE contains "127.0.0.1 $FLOCI_HOSTNAME"
+# inside a managed marker block, so host-side tooling can resolve the
+# hostname without dnsmasq (§5.5).
+#
+# The file is root-owned and edited as root directly (NOT via run_as_floci).
+#
+# Idempotency: any existing managed block for this hostname (correct or
+# stale) is stripped via an awk BEGIN..END range delete, and a fresh block is
+# always appended. This makes "block already correct" and "stale block"
+# converge on the same code path — re-running never duplicates the block,
+# and all other /etc/hosts content is preserved exactly. The write is atomic:
+# content is built in a temp file, mode is set, then `mv -f` replaces the
+# target — /etc/hosts is never truncated in place.
+add_hosts_entry() {
+  local marker_begin="# BEGIN ${FLOCI_HOSTNAME} (managed by setup-floci.sh)"
+  local marker_end="# END ${FLOCI_HOSTNAME} (managed by setup-floci.sh)"
+  local desired_line="127.0.0.1 ${FLOCI_HOSTNAME}"
+
+  local preserved=""
+  if [[ -f "$HOSTS_FILE" ]]; then
+    preserved="$(awk -v b="$marker_begin" -v e="$marker_end" '
+      { line=$0; sub(/\r$/,"",line) }
+      line==b {inblock=1; next}
+      line==e {inblock=0; next}
+      inblock {next}
+      {print}
+    ' "$HOSTS_FILE")"
+  fi
+
+  local tmp_hosts
+  tmp_hosts="${HOSTS_FILE}.tmp.$$"
+
+  {
+    if [[ -n "$preserved" ]]; then
+      printf '%s\n' "$preserved"
+      printf '\n'
+    fi
+    printf '%s\n' "$marker_begin"
+    printf '%s\n' "$desired_line"
+    printf '%s\n' "$marker_end"
+  } >"$tmp_hosts"
+
+  if [[ -f "$HOSTS_FILE" ]] && cmp -s "$tmp_hosts" "$HOSTS_FILE"; then
+    rm -f "$tmp_hosts"
+    return 0
+  fi
+
+  chmod 0644 "$tmp_hosts"
+  mv -f "$tmp_hosts" "$HOSTS_FILE"
+}
+
+# generate_presign_secret: set global PRESIGN_SECRET.
+#
+# Reuse-if-exists: if $FLOCI_ENV_FILE already has a non-empty
+# FLOCI_AUTH_PRESIGN_SECRET=... line, reuse that value — regenerating would
+# invalidate existing pre-signed URLs (§8). Otherwise generate a fresh
+# 32-byte hex secret via openssl.
+#
+# The env file is owned by $FLOCI_USER, so it is read via run_as_floci.
+# PRESIGN_SECRET is intentionally NOT readonly — it is set at runtime.
+generate_presign_secret() {
+  PRESIGN_SECRET=""
+
+  if run_as_floci test -f "$FLOCI_ENV_FILE"; then
+    local existing
+    existing="$(run_as_floci grep -m1 '^FLOCI_AUTH_PRESIGN_SECRET=' "$FLOCI_ENV_FILE" 2>/dev/null || true)"
+    existing="${existing#FLOCI_AUTH_PRESIGN_SECRET=}"
+    if [[ -n "$existing" ]]; then
+      PRESIGN_SECRET="$existing"
+      return 0
+    fi
+  fi
+
+  PRESIGN_SECRET="$(openssl rand -hex 32)"
+}
+
+# write_env_file: render $FLOCI_ENV_FILE (mode 0600, owned floci) atomically,
+# mirroring the write_quadlet_unit pattern exactly: mkdir -p the parent dir,
+# back up an existing file to .bak before overwriting, tee into a .tmp
+# sidecar, chmod the tmp file, then mv -f for an atomic rename.
+#
+# Requires $PRESIGN_SECRET to already be set (generate_presign_secret runs
+# first per §15). FLOCI_DOCKER_DOCKER_HOST is intentionally never emitted —
+# the socket is mounted at /var/run/docker.sock inside the container and
+# Floci's default handles it (§12).
+write_env_file() {
+  run_as_floci mkdir -p "$FLOCI_ENV_DIR"
+
+  if run_as_floci test -f "$FLOCI_ENV_FILE"; then
+    run_as_floci cp "$FLOCI_ENV_FILE" "${FLOCI_ENV_FILE}.bak"
+  fi
+
+  run_as_floci tee "${FLOCI_ENV_FILE}.tmp" >/dev/null <<EOF
+FLOCI_HOSTNAME=${FLOCI_HOSTNAME}
+FLOCI_BASE_URL=${FLOCI_BASE_URL}
+FLOCI_DEFAULT_REGION=${FLOCI_DEFAULT_REGION}
+FLOCI_DEFAULT_ACCOUNT_ID=${FLOCI_DEFAULT_ACCOUNT_ID}
+FLOCI_STORAGE_MODE=${FLOCI_STORAGE_MODE}
+FLOCI_STORAGE_PERSISTENT_PATH=${FLOCI_STORAGE_PERSISTENT_PATH}
+FLOCI_STORAGE_HOST_PERSISTENT_PATH=${FLOCI_HOST_PERSISTENT_PATH}
+FLOCI_TLS_ENABLED=${FLOCI_TLS_ENABLED}
+FLOCI_TLS_SELF_SIGNED=${FLOCI_TLS_SELF_SIGNED}
+FLOCI_SERVICES_DOCKER_NETWORK=${PODMAN_NETWORK}
+FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=${PODMAN_NETWORK}
+FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE=${FLOCI_HOSTNAME}
+FLOCI_AUTH_PRESIGN_SECRET=${PRESIGN_SECRET}
+FLOCI_DOCKER_LOG_MAX_SIZE=${FLOCI_LOG_MAX_SIZE}
+FLOCI_DOCKER_LOG_MAX_FILE=${FLOCI_LOG_MAX_FILE}
+EOF
+
+  run_as_floci chmod 0600 "${FLOCI_ENV_FILE}.tmp"
+  run_as_floci mv -f "${FLOCI_ENV_FILE}.tmp" "$FLOCI_ENV_FILE"
 }
 
 # (Phase functions are implemented incrementally, one unit per commit.)
