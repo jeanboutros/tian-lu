@@ -921,7 +921,6 @@ main() {
   # Phase 1: Preflight
   assert_root_or_sudo
   assert_ubuntu_version
-  assert_userns_allowed
   detect_hostname_and_ip
   phase_pause
 
@@ -933,6 +932,11 @@ main() {
 
   # Phase 3: Podman setup
   install_podman
+  # assert_userns_allowed runs AFTER install_podman so the newuidmap/newgidmap
+  # binaries exist on every run — otherwise the helper profile blocks are
+  # gated out on Run-1 (binaries absent) but written on Run-2 (binaries
+  # present from Run-1's install_podman), breaking semantic convergence.
+  assert_userns_allowed
   enable_lingering
   configure_xdg_runtime_dir
   start_podman_socket
