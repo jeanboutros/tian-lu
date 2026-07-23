@@ -194,15 +194,16 @@ _source_and_run() {
   # ProtectSystem, ReadWritePaths, PrivateTmp, ProtectKernelTunables,
   # PrivateDevices, ProtectKernelModules, ProtectControlGroups are all
   # excluded — they trigger systemd-executor's implicit userns or capability
-  # drops that AppArmor denies in a rootless user unit.
-  run grep -E "ProtectSystem=|ReadWritePaths=|PrivateTmp=|ProtectKernelTunables=|PrivateDevices=|ProtectKernelModules=|ProtectControlGroups=" "$FLOCI_QUADLET_FILE"
+  # drops that AppArmor denies in a rootless user unit. RestrictSUIDSGID is
+  # excluded — it strips SUID/SGID bits, which breaks Podman's idmapped layer
+  # copy under UserNS=keep-id (must preserve SUID on setuid root binaries).
+  run grep -E "ProtectSystem=|ReadWritePaths=|PrivateTmp=|ProtectKernelTunables=|PrivateDevices=|ProtectKernelModules=|ProtectControlGroups=|RestrictSUIDSGID=" "$FLOCI_QUADLET_FILE"
   [ "$status" -ne 0 ]
   # The seccomp-based subset that does NOT require namespace creation is kept.
   grep -q "NoNewPrivileges=true" "$FLOCI_QUADLET_FILE"
   grep -q "RestrictAddressFamilies=" "$FLOCI_QUADLET_FILE"
   grep -q "LockPersonality=true" "$FLOCI_QUADLET_FILE"
   grep -q "RestrictRealtime=true" "$FLOCI_QUADLET_FILE"
-  grep -q "RestrictSUIDSGID=true" "$FLOCI_QUADLET_FILE"
   grep -q "SystemCallArchitectures=native" "$FLOCI_QUADLET_FILE"
 }
 

@@ -208,18 +208,23 @@ run_as_floci() {
 # [Service] hardening is the maximal subset safe for a ROOTLESS user unit on
 # Ubuntu 26.04 with AppArmor userns restriction. The seccomp-based directives
 # kept here (NoNewPrivileges, RestrictAddressFamilies, LockPersonality,
-# RestrictRealtime, RestrictSUIDSGID, SystemCallArchitectures) do NOT require
-# namespace creation. The filesystem-sandbox directives (ProtectSystem=strict,
-# ReadWritePaths, PrivateTmp, ProtectKernelTunables) are excluded: under
-# systemd 259 they make systemd-executor create an IMPLICIT user namespace to
-# set up the sandbox, and AppArmor's unprivileged_userns sandbox (which has no
-# userns grant for systemd-executor) denies cap_sys_admin → "cannot clone:
-# Operation not permitted" → the service fails to start. PrivateDevices and
-# ProtectKernelModules are excluded for the same userns/CAP_SETPCAP reason
-# (status=218/CAPABILITIES). ProtectControlGroups is documented
-# system-service-only in systemd 259 and conflicts with Podman's cgroup
-# management. MemoryDenyWriteExecute is excluded (JVM JIT) and
-# RestrictNamespaces is excluded (Podman needs namespace creation).
+# RestrictRealtime, SystemCallArchitectures) do NOT require namespace creation
+# and do NOT strip SUID/SGID bits. The filesystem-sandbox directives
+# (ProtectSystem=strict, ReadWritePaths, PrivateTmp, ProtectKernelTunables)
+# are excluded: under systemd 259 they make systemd-executor create an IMPLICIT
+# user namespace to set up the sandbox, and AppArmor's unprivileged_userns
+# sandbox (which has no userns grant for systemd-executor) denies cap_sys_admin
+# → "cannot clone: Operation not permitted" → the service fails to start.
+# PrivateDevices and ProtectKernelModules are excluded for the same
+# userns/CAP_SETPCAP reason (status=218/CAPABILITIES). RestrictSUIDSGID is
+# excluded: it strips SUID/SGID bits, which breaks Podman's idmapped layer
+# copy under UserNS=keep-id — the copy must preserve the SUID bit on setuid
+# root binaries (e.g. usr/bin/chage), and stripping it fails with
+# "storage-chown-by-maps: chmod usr/bin/chage: operation not permitted".
+# ProtectControlGroups is documented system-service-only in systemd 259 and
+# conflicts with Podman's cgroup management. MemoryDenyWriteExecute is
+# excluded (JVM JIT) and RestrictNamespaces is excluded (Podman needs
+# namespace creation).
 write_quadlet_unit() {
   run_as_floci mkdir -p "$QUADLET_UNIT_DIR"
 
@@ -264,7 +269,6 @@ NoNewPrivileges=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=true
 RestrictRealtime=true
-RestrictSUIDSGID=true
 SystemCallArchitectures=native
 Restart=on-failure
 RestartSec=5

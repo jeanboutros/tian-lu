@@ -180,12 +180,11 @@ Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60
 StartLimitBurst=5
-# Hardening — seccomp-based subset only (no namespace creation required)
+# Hardening — seccomp-based subset only (no namespace creation or SUID stripping)
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 # NOTE: MemoryDenyWriteExecute NOT set (Floci is JVM-based)
 # NOTE: RestrictNamespaces NOT set (Podman requires namespace creation)
@@ -198,6 +197,10 @@ SystemCallArchitectures=native
 # NOTE: PrivateDevices NOT set — drops CAP_MKNOD/CAP_SYS_RAWIO via PR_CAPBSET_DROP
 #       which needs CAP_SETPCAP unavailable to a rootless user → status=218/CAPABILITIES.
 # NOTE: ProtectKernelModules NOT set — same 218 mechanism (drops CAP_SYS_MODULE).
+# NOTE: RestrictSUIDSGID NOT set — strips SUID/SGID bits, which breaks Podman's
+#       idmapped layer copy under UserNS=keep-id (must preserve SUID on setuid
+#       root binaries like usr/bin/chage) → "storage-chown-by-maps: chmod
+#       usr/bin/chage: operation not permitted".
 # NOTE: ProtectControlGroups NOT set — systemd 259 marks it system-service-only
 #       and it conflicts with Podman cgroup management.
 
