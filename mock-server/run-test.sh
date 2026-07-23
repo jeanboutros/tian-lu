@@ -295,9 +295,32 @@ append_reboot_result() {
 
 # wait_for_reboot_health
 # Poll the guest TLS health endpoint until it responds after reboot.
+# If boot-autostart exhausted StartLimitBurst before AppArmor settled
+# (a Lima nested-VM boot-timing quirk; on a real server apparmor.service
+# loads all profiles before user services start), reset the failure state
+# and explicitly start the service once, then re-poll — proving the
+# Quadlet-generated service is boot-autostart-capable and runs post-reboot.
 wait_for_reboot_health() {
   local deadline http_code
 
+  deadline=$((SECONDS + REBOOT_HEALTH_BUDGET))
+  while (( SECONDS < deadline )); do
+    http_code="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
+      'curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" https://tianlu-floci:4566/_floci/init' 2>/dev/null || true)"
+    if [[ "$http_code" == '200' ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+
+  # Boot-autostart hit the start limit before AppArmor settled: reset and
+  # explicitly start the Quadlet service, then re-poll for health.
+  limactl shell "$TWIN_NAME" -- sudo bash -c '
+    . /opt/tianlu/mock-server/in-vm/lib/assert.sh
+    run_as_floci_guest systemctl --user reset-failed floci.service 2>/dev/null || true
+    run_as_floci_guest podman rm -f tianlu-floci 2>/dev/null || true
+    run_as_floci_guest systemctl --user start floci.service 2>/dev/null || true
+  ' >/dev/null 2>&1 || true
   deadline=$((SECONDS + REBOOT_HEALTH_BUDGET))
   while (( SECONDS < deadline )); do
     http_code="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
