@@ -154,7 +154,8 @@ ensure_twin() {
       return 1
     }
   else
-    limactl start "$TWIN_NAME" "$TWIN_TEMPLATE" || {
+    # Lima 2.x: create+start in one step with --name=<instance> <template>.
+    limactl start --name="$TWIN_NAME" "$TWIN_TEMPLATE" || {
       FAIL_REASON='failed to create and start twin'
       return 1
     }
