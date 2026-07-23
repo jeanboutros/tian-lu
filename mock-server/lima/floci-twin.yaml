@@ -43,10 +43,15 @@ vmOpts:
       binfmt: true
 
 # --- Images ---------------------------------------------------------- #
-# Inherit the pinned 26.04 arm64 cloud image from the bundled template.
-# Only the aarch64 entry is relevant here; Lima selects by arch.
+# Ubuntu 24.04 LTS (Noble) arm64. The target production OS is 26.04, but the
+# 26.04 cloud image now ships `podman` and the `podman-userns`/`passt`/`pasta`
+# AppArmor profiles in the base image (via `apparmor-profiles`), which would
+# defeat the harness's goal of exercising `install_podman()` and
+# `assert_userns_allowed`'s profile install. 24.04 LTS does not bundle those,
+# so the installer's install paths are genuinely exercised. The installer
+# itself is arch-agnostic bash and behaves identically on both.
 base:
-- template:_images/ubuntu-26.04
+- template:_images/ubuntu-24.04
 
 # --- Mounts ---------------------------------------------------------- #
 # Override the default home mount. Mount the repo read-only at /opt/tianlu
