@@ -64,7 +64,7 @@ A dedicated `floci` user is created with:
 - **Shell:** `/bin/bash` — required for `systemd --user` to start a user session. A `nologin` shell prevents PAM from initializing the user session, which breaks rootless Podman.
 - **Password:** locked via `passwd -l` — no interactive login is possible, but systemd user services work.
 - **Home:** `/home/floci` with `0700` permissions — on a multi-user server, no other user can read the Floci data directory (which contains the TLS private key for the self-signed certificate).
-- **subuid/subgid:** a contiguous range (default 100000:262144) allocated in `/etc/subuid` and `/etc/subgid`. Under rootless Podman's default mapping, all containers share the same subuid range (not disjoint slices), so the range size governs per-container UID diversity, not container count. 262144 provides headroom for containers that use `--userns=auto` (disjoint per-container allocation). The script checks for collisions with existing entries before assigning and scans for the next free contiguous range if the default is taken. There is no kernel or `newuidmap` performance cost for a single large entry — the `subuid(5)` performance warning is about the number of *lines/users* in the file, not range size. There is no security benefit from a larger range (all mapped UIDs are unprivileged).
+- **subuid/subgid:** a contiguous range (default 100000:262144) allocated in `/etc/subuid` and `/etc/subgid`. Under rootless Podman's default mapping, all containers share the same subuid range (not disjoint slices), so the range size governs per-container UID diversity, not container count. 262144 provides headroom for containers that use `--userns=auto` (disjoint per-container allocation). The script checks for collisions with existing entries before assigning and scans for the next free contiguous range if the default is taken. There is no kernel or `newuidmap` performance cost for a single large entry — the `subuid(5)` performance warning is about the number of *lines/users* in the file, not range size. There is no security benefit from a larger range (all mapped UIDs are unprivileged). The correctness constraint is therefore *non-overlapping ranges across users*, not the range size: the collision check exists to guarantee the `floci` range does not overlap another user's, while the 262144 count is purely `--userns=auto` headroom and is safe to shrink if a host's `/etc/subuid` is tightly packed.
 
 ## 5. Container runtime configuration
 
@@ -257,9 +257,56 @@ The rootless Podman socket at `/run/user/<UID>/podman/podman.sock` is accessible
 - If limited access is needed, use a root-owned wrapper script (`/usr/local/bin/floci-ctl`, mode 0755, root:root) that internally calls `podman logs`/`ps` with hardcoded arguments — never exposes the socket or a shell to the caller.
 - The script does not create a sudoers.d file — sudoers policy is an operator responsibility.
 
-### 11.2 AppArmor
+### 11.2 AppArmor and unprivileged user namespaces
 
-Ubuntu 26.04 enables AppArmor by default. Rootless Podman + AppArmor can conflict — the container confinement may block socket creation or namespace setup. If Podman fails with permission denied errors, run `dmesg | grep apparmor` and adjust profiles or set `--security-opt apparmor=unconfined` on the container.
+Ubuntu 23.10+ (including 24.04 and 26.04) ships with
+`kernel.apparmor_restrict_unprivileged_userns=1`. This sysctl makes the kernel
+refuse `unshare(CLONE_NEWUSER)` for any program that is not covered by an
+AppArmor profile carrying the `userns` permission. Rootless Podman relies on
+unprivileged user-namespace creation for **every** container start, so on a
+stock install Podman fails at namespace setup — typically with
+`Error: could not create user namespace: Operation not permitted` or a
+`newuidmap`/`unshare` EPERM. This is the single most likely
+"configured-correctly-but-won't-start" failure on a fresh Ubuntu server, and
+it is silent unless you check `dmesg | grep -i apparmor`.
+
+**Resolution — a scoped AppArmor profile (`assert_userns_allowed`, Phase 1).**
+The preflight reads `/proc/sys/kernel/apparmor_restrict_unprivileged_userns`.
+If it is `0` (or the file is absent, i.e. the restriction is not in force),
+there is nothing to do. If it is `1`, the script checks whether a profile that
+already permits userns for the Podman binary is loaded; if not, it **installs a
+narrowly-scoped profile** at `/etc/apparmor.d/podman-userns` that grants only
+the `userns` capability to `/usr/bin/podman` and loads it with
+`apparmor_parser -r`. The profile body is:
+
+```
+abi <abi/4.0>,
+include <tunables/global>
+
+profile podman-userns /usr/bin/podman flags=(unconfined) {
+  userns,
+  include if exists <local/podman-userns>
+}
+```
+
+Helper binaries that Podman execs and that also create namespaces —
+`/usr/bin/crun` (or `runc`) and `/usr/bin/pasta` — receive the same scoped
+treatment if they are present, so rootless networking (pasta) and container
+launch (crun) are not blocked either.
+
+**What the script must never do.** It must **not** set
+`kernel.apparmor_restrict_unprivileged_userns=0`, and it must **not** apply
+`--security-opt apparmor=unconfined` to the container. Both re-enable
+unconstrained unprivileged userns creation host-wide (or drop confinement for
+the workload), which breaches least privilege — the whole point of the Ubuntu
+default is to deny userns to everything *except* explicitly-permitted binaries.
+The scoped profile grants exactly one capability to exactly the binaries that
+need it and nothing else.
+
+This step is idempotent: a re-run detects the already-loaded permitting profile
+(or an already-permissive sysctl) and makes no changes. See GAP items in
+`docs/design/gaps-register.md` if profile naming collides with a
+distribution-shipped Podman profile on a future Ubuntu release.
 
 ## 12. Environment file
 
@@ -322,10 +369,11 @@ The script is structured in named phases. With `--interactive`, it pauses at eac
 
 ```
 Phase 1: Preflight
-  assert_root_or_sudo
+  parse_args (--interactive, --firewall-scope)   # first, so --interactive gates this phase's pause
+  → assert_root_or_sudo
   → assert_ubuntu_version
+  → assert_userns_allowed (scoped AppArmor userns profile; never disables the sysctl)
   → detect_hostname_and_ip
-  → parse_args (--interactive, --firewall-scope)
   [phase_pause]
 
 Phase 2: User setup

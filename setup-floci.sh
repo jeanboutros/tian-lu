@@ -104,6 +104,25 @@ readonly FLOCI_DATA_DIR="${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}"
 readonly QUADLET_UNIT_DIR="${QUADLET_UNIT_DIR:-${FLOCI_HOME}/.config/containers/systemd}"
 readonly FLOCI_QUADLET_FILE="${FLOCI_QUADLET_FILE:-${QUADLET_UNIT_DIR}/floci.container}"
 
+# --- OS / preflight ---
+readonly OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+readonly MIN_UBUNTU_VERSION="${MIN_UBUNTU_VERSION:-24.04}"
+
+# --- AppArmor / userns ---
+readonly USERNS_SYSCTL_FILE="${USERNS_SYSCTL_FILE:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+readonly APPARMOR_PROFILES_FILE="${APPARMOR_PROFILES_FILE:-/sys/kernel/security/apparmor/profiles}"
+readonly APPARMOR_PROFILE_DIR="${APPARMOR_PROFILE_DIR:-/etc/apparmor.d}"
+readonly APPARMOR_USERNS_PROFILE="${APPARMOR_USERNS_PROFILE:-${APPARMOR_PROFILE_DIR}/podman-userns}"
+
+# --- Container runtime binaries ---
+readonly PODMAN_BIN="${PODMAN_BIN:-/usr/bin/podman}"
+readonly CRUN_BIN="${CRUN_BIN:-/usr/bin/crun}"
+readonly PASTA_BIN="${PASTA_BIN:-/usr/bin/pasta}"
+
+# --- Sub{uid,gid} files ---
+readonly SUBUID_FILE="${SUBUID_FILE:-/etc/subuid}"
+readonly SUBGID_FILE="${SUBGID_FILE:-/etc/subgid}"
+
 # --- Interactive mode ---
 # When --interactive is set and stdin is a TTY, the script pauses at each
 # phase boundary. This allows inspection between phases (e.g. viewing
@@ -236,6 +255,249 @@ enable_systemd_service() {
   fi
 
   run_as_floci systemctl --user start floci.service
+}
+
+# ----------------------------------------------------------------------------
+# Phase 1 functions
+# ----------------------------------------------------------------------------
+
+# assert_root_or_sudo: effective UID must be 0.
+assert_root_or_sudo() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    printf 'ERROR: must run as root (use sudo)\n' >&2
+    exit 1
+  fi
+}
+
+# assert_ubuntu_version: require Ubuntu >= MIN_UBUNTU_VERSION.
+assert_ubuntu_version() {
+  if [[ ! -f "$OS_RELEASE_FILE" ]]; then
+    printf 'ERROR: %s not found — cannot verify OS\n' "$OS_RELEASE_FILE" >&2
+    exit 1
+  fi
+
+  local os_id=""
+  local os_version=""
+
+  while IFS='=' read -r key val; do
+    # Strip surrounding quotes from value.
+    val="${val%\"}"
+    val="${val#\"}"
+    case "$key" in
+      ID)         os_id="$val" ;;
+      VERSION_ID) os_version="$val" ;;
+    esac
+  done <"$OS_RELEASE_FILE"
+
+  # Accept only the exact ID "ubuntu" (all Ubuntu flavours report ID=ubuntu).
+  case "$os_id" in
+    ubuntu) : ;;
+    *)
+      printf 'ERROR: unsupported OS "%s" — Ubuntu %s+ required\n' \
+        "$os_id" "$MIN_UBUNTU_VERSION" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ -z "$os_version" ]]; then
+    printf 'ERROR: could not parse VERSION_ID from %s\n' "$OS_RELEASE_FILE" >&2
+    exit 1
+  fi
+
+  # Compare versions using sort -V: the minimum of the two must equal MIN.
+  local lowest
+  lowest="$(printf '%s\n%s\n' "$MIN_UBUNTU_VERSION" "$os_version" \
+    | sort -V | head -n1)"
+  if [[ "$lowest" != "$MIN_UBUNTU_VERSION" ]]; then
+    printf 'ERROR: Ubuntu %s is too old — %s+ required\n' \
+      "$os_version" "$MIN_UBUNTU_VERSION" >&2
+    exit 1
+  fi
+}
+
+# assert_userns_allowed: ensure AppArmor permits rootless user namespaces.
+#
+# If the kernel sysctl that restricts unprivileged userns is absent or not set
+# to 1, nothing needs to be done.  If it is 1, install (or verify already
+# installed) a permitting AppArmor profile for the Podman binary chain.
+#
+# HARD PROHIBITIONS: this function MUST NOT write to USERNS_SYSCTL_FILE,
+# run sysctl to disable the restriction, or emit apparmor=unconfined.
+assert_userns_allowed() {
+  # Restriction not in force — nothing to do.
+  if [[ ! -f "$USERNS_SYSCTL_FILE" ]]; then
+    return 0
+  fi
+
+  local sysctl_val
+  sysctl_val="$(tr -d '[:space:]' <"$USERNS_SYSCTL_FILE")"
+  if [[ "$sysctl_val" != "1" ]]; then
+    return 0
+  fi
+
+  # Value is 1: check if the permitting profile is already loaded.
+  if [[ -f "$APPARMOR_PROFILES_FILE" ]] \
+    && grep -q 'podman-userns' "$APPARMOR_PROFILES_FILE"; then
+    return 0
+  fi
+
+  # Install the AppArmor profile.
+  mkdir -p "$APPARMOR_PROFILE_DIR"
+
+  local tmp_profile
+  tmp_profile="${APPARMOR_USERNS_PROFILE}.tmp.$$"
+
+  # Write the mandatory podman block (specifiers literal, not shell-expanded
+  # except for the path token in the profile line).
+  {
+    printf 'abi <abi/4.0>,\n'
+    printf 'include <tunables/global>\n'
+    printf '\n'
+    printf 'profile podman-userns %s flags=(unconfined) {\n' "$PODMAN_BIN"
+    printf '  userns,\n'
+    printf '  include if exists <local/podman-userns>\n'
+    printf '}\n'
+  } >"$tmp_profile"
+
+  # Optional crun block (only if the binary exists on disk).
+  if [[ -f "$CRUN_BIN" ]]; then
+    {
+      printf '\nprofile podman-userns-crun %s flags=(unconfined) {\n' "$CRUN_BIN"
+      printf '  userns,\n'
+      printf '}\n'
+    } >>"$tmp_profile"
+  fi
+
+  # Optional pasta block.
+  if [[ -f "$PASTA_BIN" ]]; then
+    {
+      printf '\nprofile podman-userns-pasta %s flags=(unconfined) {\n' "$PASTA_BIN"
+      printf '  userns,\n'
+      printf '}\n'
+    } >>"$tmp_profile"
+  fi
+
+  chmod 0644 "$tmp_profile"
+  mv -f "$tmp_profile" "$APPARMOR_USERNS_PROFILE"
+
+  apparmor_parser -r "$APPARMOR_USERNS_PROFILE"
+}
+
+# detect_hostname_and_ip: set globals SERVER_IP and SERVER_LAN_SUBNET.
+detect_hostname_and_ip() {
+  # Primary: extract the token after "src" from the ip-route output using awk
+  # (awk does its own whitespace splitting, immune to global IFS=$'\n\t').
+  SERVER_IP="$(ip route get 1.1.1.1 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+
+  # Fallback: first field from hostname -I (also via awk for IFS-safety).
+  if [[ -z "$SERVER_IP" ]]; then
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  if [[ -z "$SERVER_IP" ]]; then
+    printf 'ERROR: could not detect server IP address\n' >&2
+    exit 1
+  fi
+
+  # Compute /24 subnet: replace 4th octet with 0.
+  # IFS='.' read is a per-command prefix — safe regardless of global IFS.
+  local octet1 octet2 octet3
+  IFS='.' read -r octet1 octet2 octet3 _ <<< "$SERVER_IP"
+  SERVER_LAN_SUBNET="${octet1}.${octet2}.${octet3}.0/24"
+
+  export SERVER_IP SERVER_LAN_SUBNET
+}
+
+# parse_args: parse command-line arguments.
+parse_args() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --interactive)
+        INTERACTIVE=true
+        ;;
+      --firewall-scope=auto)
+        FIREWALL_SCOPE=auto
+        ;;
+      --firewall-scope=rfc1918)
+        FIREWALL_SCOPE=rfc1918
+        ;;
+      --firewall-scope=*)
+        printf 'ERROR: unknown firewall scope "%s" (use auto or rfc1918)\n' \
+          "${arg#--firewall-scope=}" >&2
+        exit 2
+        ;;
+      *)
+        printf 'ERROR: unknown argument "%s"\n' "$arg" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+# ----------------------------------------------------------------------------
+# Phase 2 functions
+# ----------------------------------------------------------------------------
+
+# create_floci_user: idempotent user creation.
+create_floci_user() {
+  if getent passwd "$FLOCI_USER" >/dev/null 2>&1; then
+    return 0
+  fi
+  useradd --create-home --home-dir "$FLOCI_HOME" --shell "$FLOCI_SHELL" "$FLOCI_USER"
+  chmod "$FLOCI_HOME_PERMS" "$FLOCI_HOME"
+}
+
+# lock_floci_password: idempotent password lock.
+lock_floci_password() {
+  local status_output
+  status_output="$(passwd -S "$FLOCI_USER" 2>/dev/null || true)"
+  # Second field of passwd -S output is the lock status: L = locked.
+  local status_field
+  status_field="$(printf '%s\n' "$status_output" | awk '{print $2}')"
+  if [[ "$status_field" == "L" ]]; then
+    return 0
+  fi
+  passwd -l "$FLOCI_USER"
+}
+
+# configure_subuid_subgid: allocate non-overlapping subuid/subgid ranges.
+configure_subuid_subgid() {
+  local map_file
+  for map_file in "$SUBUID_FILE" "$SUBGID_FILE"; do
+    # Idempotency: skip if the user's line already exists.
+    if [[ -f "$map_file" ]] && grep -q "^${FLOCI_USER}:" "$map_file"; then
+      continue
+    fi
+
+    # Find a non-overlapping candidate start >= SUBUID_START.
+    local candidate
+    candidate="$SUBUID_START"
+    local changed=1
+    local range_end
+    local candidate_end
+
+    # Iterate until no overlap is found.
+    while [[ "$changed" -eq 1 ]]; do
+      changed=0
+      if [[ -f "$map_file" ]]; then
+        while IFS=: read -r _user range_start range_count; do
+          # Skip malformed lines.
+          [[ -z "$range_start" || -z "$range_count" ]] && continue
+          range_end=$(( range_start + range_count ))
+          candidate_end=$(( candidate + SUBUID_COUNT ))
+          # Check overlap: [candidate, candidate_end) overlaps [range_start, range_end)
+          if [[ "$candidate" -lt "$range_end" && "$candidate_end" -gt "$range_start" ]]; then
+            candidate="$range_end"
+            changed=1
+          fi
+        done <"$map_file"
+      fi
+    done
+
+    printf '%s:%d:%d\n' "$FLOCI_USER" "$candidate" "$SUBUID_COUNT" >>"$map_file"
+  done
 }
 
 # (Phase functions are implemented incrementally, one unit per commit.)

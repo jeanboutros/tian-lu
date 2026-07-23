@@ -16,8 +16,7 @@
 set -u
 
 name="$(basename "$0")"
-key="${name//[^a-zA-Z0-9]/_}"
-key="${key^^}"
+key="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
 
 if [[ -n "${STUB_LOG:-}" ]]; then
   printf '%s %s\n' "$name" "$*" >>"$STUB_LOG"
