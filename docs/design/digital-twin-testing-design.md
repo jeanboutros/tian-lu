@@ -19,7 +19,7 @@ The harness orchestrates interaction between the macOS host and a Lima-managed U
 │  │   run-test.sh        │─────▶│   evidence/         │  │
 │  └──────────┬───────────┘      └──────────▲──────────┘  │
 │             │                             │             │
-│             │ SSH (vsock) / systemd-run   │ virtiofs    │
+│             │ SSH (vsock) / systemd-run   │ 9p          │
 │             ▼                             │ (rw)        │
 └─────────────┼─────────────────────────────┼─────────────┘
               │                             │
@@ -28,7 +28,7 @@ The harness orchestrates interaction between the macOS host and a Lima-managed U
 │                                           │
 │  ┌──────────────────────┐      ┌──────────┴──────────┐  │
 │  │ /opt/tianlu (repo)   │      │ /opt/twin-evidence  │  │
-│  │ (virtiofs ro mount)  │      │ (staging area)      │  │
+│  │ (9p ro mount)       │      │ (staging area)      │  │
 │  └──────────┬───────────┘      └──────────▲──────────┘  │
 │             │                             │             │
 │             │ driver launch               │ writes      │
@@ -40,7 +40,7 @@ The harness orchestrates interaction between the macOS host and a Lima-managed U
 └─────────────────────────────────────────────────────────┘
 ```
 
-The design is SSH-independent for result reporting. The host orchestrator (`run-test.sh`) launches the guest driver via `systemd-run` as a transient unit. The driver writes results to a staging directory on a `virtiofs` mount. This mount is pinned so that guest writes survive the enablement of the UFW firewall, which would otherwise block SSH-based file transfers. The driver signals completion by writing an atomic sentinel file and a SHA256 manifest. The host polls the mount and publishes evidence via host-side `cp`.
+The design is SSH-independent for result reporting. The host orchestrator (`run-test.sh`) launches the guest driver via `systemd-run` as a transient unit. The driver writes results to a staging directory on a `9p` mount. This mount is pinned so that guest writes survive the enablement of the UFW firewall, which would otherwise block SSH-based file transfers. The driver signals completion by writing an atomic sentinel file and a SHA256 manifest. The host polls the mount and publishes evidence via host-side `cp`.
 
 ## 3. Fidelity to the production server
 
@@ -69,7 +69,7 @@ Architecture-specific behavior of Floci or its sidecar containers on x86_64 is o
 
 The harness consists of the following components:
 
-- **`mock-server/lima/floci-twin.yaml`:** The VM definition. It specifies `vmType: vz`, `arch: aarch64`, and `mountType: virtiofs`. It targets Ubuntu 26.04 arm64 (falling back to 24.04 LTS if 26.04 is unavailable). Provisioning installs only operator-prerequisite packages (`curl`, `ca-certificates`, `apparmor`, `apparmor-utils`, `ufw`, `nftables`) to ensure the installer's `install_podman` logic is genuinely exercised.
+- **`mock-server/lima/floci-twin.yaml`:** The VM definition. It specifies `vmType: qemu` (the macOS `vz` backend blocks unprivileged user-namespace creation inside the guest, which rootless Podman requires), `arch: aarch64`, and `mountType: 9p` (a non-SSH mount transport so guest writes survive UFW enable; `virtiofs` would require `vz`). It targets Ubuntu 26.04 arm64. Provisioning installs only operator-prerequisite packages (`curl`, `ca-certificates`, `apparmor`, `apparmor-utils`, `ufw`, `nftables`) to ensure the installer's `install_podman` logic is genuinely exercised.
 - **`mock-server/in-vm/lib/assert.sh`:** A library of pure bash helpers and the `run_as_floci_guest` helper, which mirrors the `run_as_floci` pattern in the installer for consistent privilege drop.
 - **`mock-server/in-vm/run-in-vm.sh`:** The guest driver. It performs preflight checks, establishes operator prerequisites, executes the installer (Run-1), validates sidecar spawning, verifies semantic convergence (Run-2), and redacts secrets from evidence.
 - **`mock-server/run-test.sh`:** The host orchestrator. It manages the VM lifecycle, launches the guest driver, polls for the completion sentinel, and validates the evidence manifest.

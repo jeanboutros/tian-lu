@@ -23,7 +23,7 @@ The harness is built as an arm64 integration twin using the Lima `vz` backend. I
 
 ### 3.2 Twin Definition
 - Implement `mock-server/lima/floci-twin.yaml`.
-- Configure `virtiofs` mounts for the repository (read-only) and evidence staging (read-write).
+- Configure `9p` mounts for the repository (read-only) and evidence staging (read-write).
 - Define the provisioning script to install operator prerequisites (`ufw`, `nftables`, `apparmor`) while ensuring Podman is absent to test the installer's installation logic.
 
 ### 3.3 Guest Driver
@@ -55,7 +55,7 @@ The check excludes `.bak` files, which are treated as volatile backup artifacts.
 ## 5. Evidence Design
 
 Evidence is managed through a staged publication design:
-1. **Staging:** The guest driver writes all logs, snapshots, and redacted configuration to the `virtiofs` mount.
+1. **Staging:** The guest driver writes all logs, snapshots, and redacted configuration to the `9p` mount.
 2. **Atomic Sentinel:** After the driver completes all tasks, it writes `manifest.sha256` followed by a `DONE` sentinel file.
 3. **Publication:** The host orchestrator detects the sentinel, validates the manifest using `sha256sum -c`, and performs a host-side `cp` from the mount to the final timestamped evidence directory.
 
