@@ -1,0 +1,112 @@
+# ===================================================================== #
+# Lima digital-twin definition for the Floci Ubuntu installer
+# ===================================================================== #
+# An arm64 Ubuntu integration twin that faithfully exercises the installer's
+# control-plane behavior: systemd-logind, lingering, rootless Podman,
+# AppArmor enforcement, Quadlet generation, UFW/nftables rule generation, and
+# reboot autostart. See docs/design/digital-twin-testing-design.md for the
+# fidelity framing and docs/design/digital-twin-testing-plan.md for the build.
+#
+# Pinned to Ubuntu 26.04 (Resolute Raccoon). The 24.04 fallback in §4.1 of the
+# plan is not needed because 26.04 arm64 is published in the bundled Lima
+# templates; if a future Lima drop removes 26.04, fall back to 24.04 LTS arm64
+# and record the choice here.
+
+minimumLimaVersion: 2.0.0
+
+# --- VM type & architecture ------------------------------------------ #
+# vz: Virtualization.framework backend (macOS 13+). Required for virtiofs.
+# aarch64: native arm64 on Apple Silicon. The Floci compat image is multi-arch
+# and resolves natively on arm64 — no Rosetta needed for the gating path.
+vmType: vz
+arch: aarch64
+
+# --- Resources ------------------------------------------------------- #
+cpus: 4
+memory: 8GiB
+disk: 30GiB
+
+# --- Mount type ------------------------------------------------------ #
+# virtiofs is pinned so guest writes to the evidence mount do not traverse
+# guest TCP/IP and survive UFW enable. SSH-independent by design.
+mountType: virtiofs
+
+# --- Rosetta (diagnostic-only, NOT required for the gating path) ----- #
+# On aarch64 host + aarch64 guest, Rosetta is not needed to run the native
+# arm64 Floci image or the arm64 Lambda sidecar. It is enabled with binfmt
+# registration purely for an optional, non-gating x86_64 diagnostic Lambda
+# lane (verified via /proc/sys/fs/binfmt_misc/rosetta before use).
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
+
+# --- Images ---------------------------------------------------------- #
+# Inherit the pinned 26.04 arm64 cloud image from the bundled template.
+# Only the aarch64 entry is relevant here; Lima selects by arch.
+base:
+- template:_images/ubuntu-26.04
+
+# --- Mounts ---------------------------------------------------------- #
+# Override the default home mount. Mount the repo read-only at /opt/tianlu
+# (the installer runs from there) and a host evidence dir read-write at
+# /opt/twin-evidence. The host evidence path is OUTSIDE the repo (default
+# ~/.cache/tianlu-twin/evidence) so evidence never enters git.
+mounts:
+- location: "{{.Dir}}/.."
+  mountPoint: /opt/tianlu
+  writable: false
+- location: "{{.Home}}/.cache/tianlu-twin/evidence"
+  mountPoint: /opt/twin-evidence
+  writable: true
+
+# --- User ------------------------------------------------------------ #
+# Lima-managed admin user with NOPASSWD sudo. The installer is invoked as
+# `sudo /opt/tianlu/setup-floci.sh` from this account.
+user:
+  passwordlessSudo: true
+
+# --- SSH ------------------------------------------------------------- #
+# SSH is not used for orchestration (the driver runs via systemd-run and
+# reports through the virtiofs mount). Leave Lima's defaults in place;
+# `limactl shell` works over vsock and does not depend on the evidence path.
+
+# --- Provisioning --------------------------------------------------- #
+# Install ONLY operator prerequisites that a stock Ubuntu Server has and
+# that the installer asserts (not installs). The installer MUST exercise
+# install_podman(), so podman/uidmap/passt/containers-common/slirp4netns
+# are deliberately ABSENT.
+provision:
+# apt update + install the exact operator-prereq set. mode: system runs as root.
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates apparmor apparmor-utils ufw nftables
+    # Defensive: ensure packages the installer owns are NOT pre-installed,
+    # so the twin genuinely exercises install_podman(). Best-effort purge
+    # only; if apt marks them manual, the installer's own presence check
+    # still drives the install path.
+    apt-get purge -y --auto-remove podman uidmap passt containers-common slirp4netns 2>/dev/null || true
+    rm -rf /var/lib/apt/lists/*
+
+# --- Readiness probe ------------------------------------------------- #
+# Wait for systemd to be usable before the host orchestrator launches the
+# driver. Runs in user mode.
+probes:
+- mode: readiness
+  description: systemd user manager reachable
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    timeout 60s bash -c 'until systemctl is-system-running >/dev/null 2>&1 || systemctl is-active default.target >/dev/null 2>&1; do sleep 2; done'
+
+# --- Containerd ------------------------------------------------------ #
+# Not needed: the twin runs rootless Podman via the installer, not containerd.
+containerd:
+  system: false
+  user: false
