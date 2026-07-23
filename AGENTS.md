@@ -11,8 +11,11 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 - `docs/design/` — design documents:
   - `solution-design.md` — full solution architecture for the Floci setup.
   - `dnsmasq-design.md` — LAN-wide DNS design for `tianlu-floci` → server IP (future stage).
-  - `gaps-register.md` — unresolved items requiring runtime testing (only 2 open gaps remain).
+  - `gaps-register.md` — unresolved items requiring runtime testing (open gaps remain; see this file for the current count).
+  - `digital-twin-testing-design.md` — design for the Lima digital-twin VM harness that validates `setup-floci.sh` end-to-end.
+  - `digital-twin-testing-plan.md` — implementation plan for the digital-twin harness.
 - `docs/scraped/` — scraped Floci documentation (9 pages). Use `docs/scraped/INDEX.md` for keyword-based lookup; it maps topics to specific files.
+- `mock-server/` — Lima digital-twin harness. `lima/floci-twin.yaml` (twin definition), `in-vm/lib/assert.sh` (helpers incl. `run_as_floci_guest`), `in-vm/run-in-vm.sh` (guest driver), `run-test.sh` (host orchestrator), `evidence/` (git-ignored run artifacts). Run with `make twin-test`. See `docs/design/digital-twin-testing-design.md`.
 
 ## Critical gotchas
 
@@ -51,8 +54,9 @@ Local tests run on macOS; the Ubuntu-only runtime (Podman/systemd/UFW) is mocked
 - `make lint` — `shellcheck` + `bash -n` on `setup-floci.sh`.
 - `make test` — `bats` unit tests in `tests/`. External commands (`podman`, `systemctl`, `loginctl`, `ufw`, `apt-get`, `useradd`, `passwd`, `openssl`, `curl`, `apparmor_parser`, …) are replaced by logging stubs on `PATH` (`tests/stubs/bin/`), so tests assert *what the script would run* and drive idempotency branches.
 - `make check` — both. Requires `shellcheck` and `bats-core` (`brew install shellcheck bats-core`).
+- `make twin-test` — runs `mock-server/run-test.sh`, the Lima digital-twin harness. Requires Lima on Apple Silicon (macOS 13+). Builds/boots a headless Ubuntu arm64 VM, runs `setup-floci.sh` inside it, drives it to a live Floci + an arm64 Lambda sidecar, re-runs for idempotency (semantic convergence), optionally reboots for boot-autostart + Quadlet ordering, and writes a manifest-validated evidence bundle. The twin is an arm64 integration twin; architecture-specific Floci/sidecar runtime behavior on x86_64 is out of scope. See `docs/design/digital-twin-testing-design.md`.
 - The script is **sourceable** (guarded `main` at the bottom: `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi`) so bats can load functions without executing them.
-- Runtime behaviour that cannot be mocked is covered by a server integration checklist (see `docs/design/gaps-register.md`).
+- Runtime behaviour that cannot be mocked is covered by the Lima digital twin (`make twin-test`); remaining x86_64-runtime-specific gaps are tracked in `docs/design/gaps-register.md`.
 
 ## Target environment
 

@@ -138,11 +138,19 @@ brew install bats-core   # local dev dependency (shellcheck also required)
 make lint                # shellcheck + bash -n
 make test                # bats unit tests (command mocking via PATH stubs)
 make check               # both
+make twin-test            # build + drive the Lima digital twin (Apple Silicon, macOS 13+)
 ```
 
-Podman/systemd/UFW behaviour can only be exercised on the Ubuntu target; the
-bats suite mocks those commands, and a server integration checklist covers the
-rest.
+Podman/systemd/UFW behaviour is exercised two ways: the `tests/` bats suite
+mocks those commands for fast unit feedback, and the **Lima digital twin**
+(`mock-server/run-test.sh`) runs the installer end-to-end inside a headless
+Ubuntu arm64 VM to validate the full control-plane behavior — systemd-logind,
+rootless Podman, AppArmor enforcement, Quadlet generation, UFW rule
+generation, and reboot autostart — before it touches the real x86_64 server.
+The twin is an arm64 integration twin; architecture-specific Floci/sidecar
+runtime behavior on x86_64 is out of scope for the twin and must be validated
+on an x86_64 host. See
+[`docs/design/digital-twin-testing-design.md`](docs/design/digital-twin-testing-design.md).
 
 ## Repository map
 
@@ -154,8 +162,11 @@ rest.
 | `REVIEW.md` | Design rationale and challenger-review findings. |
 | `docs/design/solution-design.md` | Full solution architecture. |
 | `docs/design/dnsmasq-design.md` | LAN-wide DNS design (future stage). |
+| `docs/design/digital-twin-testing-design.md` | Digital-twin VM harness design. |
+| `docs/design/digital-twin-testing-plan.md` | Digital-twin implementation plan. |
 | `docs/design/gaps-register.md` | Open items requiring runtime testing. |
 | `docs/scraped/INDEX.md` | Keyword map of scraped Floci documentation. |
+| `mock-server/` | Lima digital-twin harness (twin definition, guest driver, host orchestrator, evidence). |
 
 ## Roadmap
 
