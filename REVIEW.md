@@ -183,13 +183,10 @@ StartLimitBurst=5
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=%h
+ReadWritePaths=%h %t
 PrivateTmp=yes
-PrivateDevices=yes
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -197,6 +194,12 @@ SystemCallArchitectures=native
 # NOTE: MemoryDenyWriteExecute NOT set (Floci is JVM-based)
 # NOTE: RestrictNamespaces NOT set (Podman requires namespace creation)
 # NOTE: ProtectHome NOT set (masks /home, breaks data dir + env file access)
+# NOTE: PrivateDevices NOT set — drops CAP_MKNOD/CAP_SYS_RAWIO via PR_CAPBSET_DROP
+#       which needs CAP_SETPCAP unavailable to a rootless user when systemd's
+#       implicit userns setup is blocked (AppArmor) → status=218/CAPABILITIES.
+# NOTE: ProtectKernelModules NOT set — same 218 mechanism (drops CAP_SYS_MODULE).
+# NOTE: ProtectControlGroups NOT set — systemd 259 marks it system-service-only
+#       and it conflicts with Podman cgroup management.
 
 [Install]
 WantedBy=default.target

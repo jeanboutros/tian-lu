@@ -160,7 +160,9 @@ Quadlet-generated units are **transient** and cannot be `systemctl enable`d (sys
 
 **`[Service]` hardening** (applied to the generated unit):
 
-`NoNewPrivileges`, `ProtectSystem=strict`, **`ReadWritePaths=%h %t`**, `PrivateTmp`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops.
+`NoNewPrivileges`, `ProtectSystem=strict`, **`ReadWritePaths=%h %t`**, `PrivateTmp`, `ProtectKernelTunables`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops.
+
+`PrivateDevices`, `ProtectKernelModules`, and `ProtectControlGroups` are excluded: in a rootless user unit the first two drop capabilities (`CAP_MKNOD`/`CAP_SYS_RAWIO`, `CAP_SYS_MODULE`) via `PR_CAPBSET_DROP`, which requires `CAP_SETPCAP` the unprivileged user lacks when systemd's implicit user-namespace setup is unavailable (e.g. under AppArmor `apparmor_restrict_unprivileged_userns`) — the service then exits with `status=218/CAPABILITIES`. `ProtectControlGroups` is documented system-service-only in systemd 259 and conflicts with Podman's cgroup management. `MemoryDenyWriteExecute` is excluded (JVM JIT) and `RestrictNamespaces` is excluded (Podman needs namespace creation).
 
 - **`ReadWritePaths` must include `%t`, not only `%h`.** Under `ProtectSystem=strict` the filesystem is read-only except the listed paths. The Podman runtime and the mounted socket live under `/run/user/<UID>` (`%t`); omitting it makes the socket read-only and the container fails to start.
 

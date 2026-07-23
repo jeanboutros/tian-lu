@@ -204,6 +204,16 @@ run_as_floci() {
 #
 # %h and %t are Quadlet specifiers expanded at runtime by systemd — they must
 # appear literally in the file and must NOT be shell-expanded here.
+#
+# [Service] hardening is the maximal subset safe for a ROOTLESS user unit.
+# PrivateDevices, ProtectKernelModules, and ProtectControlGroups are excluded:
+# the first two drop capabilities (CAP_MKNOD/CAP_SYS_RAWIO, CAP_SYS_MODULE)
+# via PR_CAPBSET_DROP, which needs CAP_SETPCAP that an unprivileged user lacks
+# when systemd's implicit user-namespace setup is unavailable (e.g. under
+# AppArmor userns restriction) → exit status 218/CAPABILITIES. ProtectControlGroups
+# is documented system-service-only in systemd 259 and conflicts with Podman's
+# cgroup management. MemoryDenyWriteExecute is excluded (JVM JIT) and
+# RestrictNamespaces is excluded (Podman needs namespace creation).
 write_quadlet_unit() {
   run_as_floci mkdir -p "$QUADLET_UNIT_DIR"
 
@@ -240,10 +250,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=%h %t
 PrivateTmp=true
-PrivateDevices=true
 ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=true
 RestrictRealtime=true
