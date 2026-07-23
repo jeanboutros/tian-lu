@@ -233,7 +233,15 @@ publish_evidence() {
   FINAL="$EVIDENCE_RUN_DIR"
   (
     cd "$STAGING"
-    find . -type f ! -name "$MANIFEST_NAME" ! -name "$SENTINEL_NAME" ! -name 'FAILED' ! -name '*.bak' -print0 |
+    # Exclude the manifest/sentinel AND their .tmp sidecars (the redirect
+    # creates manifest.sha256.tmp before find lists it, which would otherwise
+    # produce a self-referential manifest entry that fails sha256sum -c).
+    # SC2094 is a false positive: find reads directory entries, not the .tmp
+    # file's content, so there is no same-file read+write in the pipeline.
+    # shellcheck disable=SC2094
+    find . -type f ! -name "$MANIFEST_NAME" ! -name "${MANIFEST_NAME}.tmp" \
+      ! -name "$SENTINEL_NAME" ! -name "${SENTINEL_NAME}.tmp" \
+      ! -name 'FAILED' ! -name '*.bak' -print0 |
       sort -z |
       xargs -0 sha256sum >"${MANIFEST_NAME}.tmp"
     mv "${MANIFEST_NAME}.tmp" "$MANIFEST_NAME"
