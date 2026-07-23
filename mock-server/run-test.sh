@@ -190,8 +190,9 @@ launch_driver() {
     driver_args+=(--no-sidecar)
   fi
   (
+    # ${arr[@]+...} guards the empty-array expansion under set -u (bash 3.2/macOS).
     limactl shell "$TWIN_NAME" -- sudo systemd-run --quiet --wait --unit=tianlu-driver -- \
-      /opt/tianlu/mock-server/in-vm/run-in-vm.sh "${driver_args[@]}"
+      /opt/tianlu/mock-server/in-vm/run-in-vm.sh ${driver_args[@]+"${driver_args[@]}"}
   ) &
   DRIVER_SHELL_PID=$!
 }
