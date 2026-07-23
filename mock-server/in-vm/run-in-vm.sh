@@ -181,7 +181,7 @@ step_run1() {
   CRITERIA[floci-service-active]=PASS
 
   image="$(run_as_floci_guest podman ps --filter name=tianlu-floci --format '{{.Image}}' 2>/dev/null || true)"
-  assert_eq "floci/floci:1.5.33-compat" "$image" "floci-image"
+  assert_eq "docker.io/floci/floci:1.5.33-compat" "$image" "floci-image"
 
   assert_http_200 "$HEALTH_URL" "health-200" "$HEALTH_TRIES" "$HEALTH_SLEEP"
   CRITERIA[health-200]=PASS
@@ -336,7 +336,7 @@ step_evidence() {
 # Run each guest-driver stage in order, leaving publication to the host wrapper.
 main() {
   parse_args "$@"
-  EVIDENCE_STAGING="${EVIDENCE_HOST_DIR}.staging"
+  EVIDENCE_STAGING="${EVIDENCE_HOST_DIR}/staging"
   mkdir -p "$EVIDENCE_STAGING"
   trap 'on_fail' ERR
 

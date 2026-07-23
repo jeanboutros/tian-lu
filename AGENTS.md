@@ -63,7 +63,7 @@ Local tests run on macOS; the Ubuntu-only runtime (Podman/systemd/UFW) is mocked
 - Ubuntu 26.04 LTS, x86_64
 - Multi-user server (home dir `0700`, subuid range collision check required)
 - Firewall: UFW only (never mix raw iptables with ufw)
-- Image: `floci/floci:1.5.33-compat` (pinned, compat variant includes AWS CLI + boto3)
+- Image: `docker.io/floci/floci:1.5.33-compat` (pinned, compat variant includes AWS CLI + boto3; fully-qualified so rootless Podman's short-name resolution is not required)
 
 ## Future stage
 

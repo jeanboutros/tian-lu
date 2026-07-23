@@ -172,7 +172,7 @@ ensure_twin() {
   }
 
   HOST_EVIDENCE_MOUNT="${HOST_HOME}/.cache/tianlu-twin/evidence"
-  STAGING="${HOST_EVIDENCE_MOUNT}.staging"
+  STAGING="${HOST_EVIDENCE_MOUNT}/staging"
   mkdir -p "$HOST_EVIDENCE_MOUNT" || {
     FAIL_REASON="cannot create evidence mount ${HOST_EVIDENCE_MOUNT}"
     return 1

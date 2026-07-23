@@ -150,10 +150,10 @@ _source_and_run() {
   grep -q "Network=floci-net" "$FLOCI_QUADLET_FILE"
 }
 
-@test "write_quadlet_unit file contains Image=floci/floci:1.5.33-compat" {
+@test "write_quadlet_unit file contains Image=docker.io/floci/floci:1.5.33-compat" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "Image=floci/floci:1.5.33-compat" "$FLOCI_QUADLET_FILE"
+  grep -q "Image=docker.io/floci/floci:1.5.33-compat" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file contains all three PublishPort lines" {

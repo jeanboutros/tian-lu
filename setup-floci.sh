@@ -45,7 +45,7 @@ readonly SUBUID_COUNT="${SUBUID_COUNT:-262144}"
 readonly PODMAN_NETWORK="${PODMAN_NETWORK:-floci-net}"
 
 # --- Floci image ---
-readonly FLOCI_IMAGE="${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
+readonly FLOCI_IMAGE="${FLOCI_IMAGE:-docker.io/floci/floci:1.5.33-compat}"
 
 # --- Floci configuration ---
 readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"

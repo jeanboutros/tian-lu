@@ -29,7 +29,7 @@ teardown() {
 @test "config constants resolve and honour overrides" {
   run bash -c "FLOCI_HOME='${TEST_TMP}/x'; source '${SCRIPT}'; printf '%s|%s|%s' \"\$FLOCI_HOME\" \"\$FLOCI_ENV_FILE\" \"\$FLOCI_IMAGE\""
   [ "$status" -eq 0 ]
-  [ "$output" = "${TEST_TMP}/x|${TEST_TMP}/x/.config/floci/floci.env|floci/floci:1.5.33-compat" ]
+  [ "$output" = "${TEST_TMP}/x|${TEST_TMP}/x/.config/floci/floci.env|docker.io/floci/floci:1.5.33-compat" ]
 }
 
 @test "executing the script runs main" {

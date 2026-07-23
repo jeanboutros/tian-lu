@@ -148,7 +148,7 @@ Quadlet-generated units are **transient** and cannot be `systemctl enable`d (sys
 
 | Directive | Value | Notes |
 |---|---|---|
-| `Image` | `floci/floci:1.5.33-compat` | pinned |
+| `Image` | `docker.io/floci/floci:1.5.33-compat` | pinned; fully-qualified so rootless Podman does not require short-name resolution |
 | `ContainerName` | `tianlu-floci` | must match `FLOCI_HOSTNAME` for Podman DNS |
 | `Network` | `floci-net` | references the network created imperatively in Phase 4 (no `.network` Quadlet, to avoid double-management) |
 | `EnvironmentFile` | `%h/.config/floci/floci.env` | all `FLOCI_*` vars; file is mode `0600`, `floci:floci`, written atomically |

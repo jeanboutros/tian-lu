@@ -5,7 +5,7 @@ Tianlu is an **idempotent bash installer** (`setup-floci.sh`) that deploys
 Server using **rootless Podman**. Run it once to stand up a hardened Floci
 service that survives reboots; re-run it any time to reconcile state.
 
-The pinned image is `floci/floci:1.5.33-compat`. The *compat* variant bundles
+The pinned image is `docker.io/floci/floci:1.5.33-compat`. The *compat* variant bundles
 Python 3, the AWS CLI, and boto3, so the container can run initialization hooks
 and client tooling without extra installs.
 
