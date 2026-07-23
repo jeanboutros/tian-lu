@@ -346,6 +346,28 @@ assert_ubuntu_version() {
   fi
 }
 
+# _system_profile_grants_userns <binary>: return 0 if any profile under
+# $APPARMOR_PROFILE_DIR attaches to <binary> and contains a `userns,` rule.
+# Used to detect Ubuntu 26.04+'s bundled podman/crun/pasta profiles so we do
+# NOT install a conflicting second profile on the same binary (which would
+# break userns creation — see assert_userns_allowed).
+_system_profile_grants_userns() {
+  local binary="$1"
+  local profile_file
+  [[ -d "$APPARMOR_PROFILE_DIR" ]] || return 1
+  while IFS= read -r profile_file; do
+    # Skip our own profile (not yet installed, but defensive).
+    [[ "$profile_file" == "$APPARMOR_USERNS_PROFILE" ]] && continue
+    awk -v bin="$binary" '
+      $0 ~ "profile[[:space:]]+[^[:space:]]+[[:space:]]+" bin "([[:space:]]|$)" { in_prof=1 }
+      in_prof && /^[[:space:]]*userns[[:space:]]*,/ { found=1 }
+      in_prof && /^}/ { in_prof=0 }
+      END { exit found ? 0 : 1 }
+    ' "$profile_file" 2>/dev/null && return 0
+  done < <(grep -rl "$binary" "$APPARMOR_PROFILE_DIR" 2>/dev/null)
+  return 1
+}
+
 # assert_userns_allowed: ensure AppArmor permits rootless user namespaces.
 #
 # If the kernel sysctl that restricts unprivileged userns is absent or not set
@@ -369,6 +391,17 @@ assert_userns_allowed() {
   # Value is 1: check if the permitting profile is already loaded.
   if [[ -f "$APPARMOR_PROFILES_FILE" ]] \
     && grep -q 'podman-userns' "$APPARMOR_PROFILES_FILE"; then
+    return 0
+  fi
+
+  # Ubuntu 26.04+ ships its own /etc/apparmor.d/podman profile that grants
+  # userns to /usr/bin/podman (via the apparmor-profiles package). Attaching a
+  # SECOND profile (our podman-userns) to the same binary creates a conflicting
+  # attachment: AppArmor then transitions podman into the restrictive
+  # unprivileged_userns sandbox on userns creation, denying the re-exec
+  # (podman fails with "failed to reexec: Permission denied"). If a system
+  # profile already grants userns for the podman binary, skip our install.
+  if _system_profile_grants_userns "$PODMAN_BIN"; then
     return 0
   fi
 

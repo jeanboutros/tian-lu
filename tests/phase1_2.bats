@@ -129,6 +129,41 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
+@test "assert_userns_allowed: no-op when system profile already grants userns (Ubuntu 26.04)" {
+  local sysctl_file="${TEST_TMP}/userns-sysctl"
+  local profile_dir="${TEST_TMP}/apparmor.d"
+  local profiles_file="${TEST_TMP}/no-apparmor-profiles"
+  local fake_podman="${TEST_TMP}/podman"
+  touch "$fake_podman"
+  printf '1\n' >"$sysctl_file"
+
+  # Simulate a system /etc/apparmor.d/podman profile granting userns for the
+  # same binary PODMAN_BIN points at.
+  mkdir -p "$profile_dir"
+  cat >"${profile_dir}/podman" <<EOF
+abi <abi/5.0>,
+include <tunables/global>
+profile podman ${fake_podman} flags=(unconfined) {
+  userns,
+  \@{exec_path} mr,
+}
+EOF
+
+  run _run_fn \
+    "export USERNS_SYSCTL_FILE='${sysctl_file}';
+     export APPARMOR_PROFILES_FILE='${profiles_file}';
+     export APPARMOR_PROFILE_DIR='${profile_dir}';
+     export APPARMOR_USERNS_PROFILE='${profile_dir}/podman-userns';
+     export PODMAN_BIN='${fake_podman}'" \
+    "assert_userns_allowed"
+  [ "$status" -eq 0 ]
+  # apparmor_parser must NOT have been called (no conflicting profile installed).
+  run grep "apparmor_parser" "$STUB_LOG"
+  [ "$status" -ne 0 ]
+  # The conflicting podman-userns file must NOT have been written.
+  [ ! -f "${profile_dir}/podman-userns" ]
+}
+
 @test "assert_userns_allowed: installs profile and calls apparmor_parser when value=1 and not loaded" {
   local sysctl_file="${TEST_TMP}/userns-sysctl"
   local profile_dir="${TEST_TMP}/apparmor.d"
