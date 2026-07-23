@@ -167,8 +167,10 @@ hash_floci_file() {
 step_run1() {
   local rc svc image buckets
 
+  # `sudo bash` rather than `sudo "$SETUP_SCRIPT"`: the repo is mounted
+  # read-only via virtiofs and the file may not carry the executable bit.
   set +e
-  sudo "$SETUP_SCRIPT" 2>&1 | tee "$EVIDENCE_STAGING/run1.log"
+  sudo bash "$SETUP_SCRIPT" 2>&1 | tee "$EVIDENCE_STAGING/run1.log"
   rc=${PIPESTATUS[0]}
   set -e
   assert_eq "0" "$rc" "run1-exit"
@@ -249,8 +251,9 @@ step_sidecar() {
 step_semantic_convergence() {
   local rc2 blocks su sg env_hash_run1 env_hash_run2 quadlet_hash_run1 quadlet_hash_run2
 
+  # `sudo bash` rather than `sudo "$SETUP_SCRIPT"`: see step_run1 (ro mount).
   set +e
-  sudo "$SETUP_SCRIPT" 2>&1 | tee "$EVIDENCE_STAGING/run2.log"
+  sudo bash "$SETUP_SCRIPT" 2>&1 | tee "$EVIDENCE_STAGING/run2.log"
   rc2=${PIPESTATUS[0]}
   set -e
   assert_eq "0" "$rc2" "run2-exit-0"
