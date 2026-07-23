@@ -404,22 +404,27 @@ assert_userns_allowed() {
     return 0
   fi
 
-  # Value is 1: check if the permitting profile is already loaded.
-  if [[ -f "$APPARMOR_PROFILES_FILE" ]] \
-    && grep -q 'podman-userns' "$APPARMOR_PROFILES_FILE"; then
-    return 0
-  fi
-
-  # Ubuntu 26.04+ ships its own /etc/apparmor.d/podman profile that grants
-  # userns to /usr/bin/podman (via the apparmor-profiles package). Attaching a
-  # SECOND profile (our podman-userns) to the same binary creates a conflicting
-  # attachment: AppArmor then transitions podman into the restrictive
-  # unprivileged_userns sandbox on userns creation, denying the re-exec
-  # (podman fails with "failed to reexec: Permission denied"). If a system
-  # profile already grants userns for the podman binary, skip our install.
-  if _system_profile_grants_userns "$PODMAN_BIN"; then
-    return 0
-  fi
+  # Value is 1. Determine which binaries in the rootless-Podman chain still
+  # need a userns-granting profile. Ubuntu 26.04+'s apparmor-profiles package
+  # ships profiles for podman/crun/pasta but NOT for newuidmap/newgidmap.
+  # Attaching a SECOND profile to a binary that already has one creates a
+  # conflicting attachment — AppArmor then transitions that binary into the
+  # restrictive unprivileged_userns sandbox on userns creation, denying the
+  # re-exec (podman: "failed to reexec: Permission denied"). So each binary
+  # gets a block ONLY if no system profile already grants it userns.
+  #
+  # If the permitting profile set is already fully loaded (every chain binary
+  # covered), there is nothing to install — short-circuit.
+  local need_install=false
+  for bin in "$PODMAN_BIN" "$CRUN_BIN" "$PASTA_BIN" "$NEWUIDMAP_BIN" "$NEWGIDMAP_BIN"; do
+    [[ -f "$bin" ]] || continue
+    if ! _system_profile_grants_userns "$bin" \
+      && ! grep -q 'podman-userns' "${APPARMOR_PROFILES_FILE:-/dev/null}" 2>/dev/null; then
+      need_install=true
+      break
+    fi
+  done
+  [[ "$need_install" == true ]] || return 0
 
   # Install the AppArmor profile.
   mkdir -p "$APPARMOR_PROFILE_DIR"
@@ -429,9 +434,9 @@ assert_userns_allowed() {
 
   # Helper: append a userns-granting block for a binary if it exists on disk
   # AND no system profile already grants it userns (avoid conflicting
-  # attachments — see the podman note above). Ubuntu 26.04 ships profiles for
-  # podman/crun/pasta but NOT for newuidmap/newgidmap, so those helpers get a
-  # block; without it, rootless Podman fails at boot with
+  # attachments — see above). Ubuntu 26.04 ships profiles for podman/crun/pasta
+  # but NOT for newuidmap/newgidmap, so those helpers get a block; without it,
+  # rootless Podman fails at boot with
   # "newuidmap: write to uid_map failed: Operation not permitted".
   _append_userns_block() {
     local bin="$1" name="$2"
@@ -440,17 +445,16 @@ assert_userns_allowed() {
     printf '\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n' "$name" "$bin" >>"$tmp_profile"
   }
 
-  # Write the mandatory podman block (specifiers literal, not shell-expanded
-  # except for the path token in the profile line).
+  # Write the profile header, then a podman block ONLY if no system profile
+  # grants podman userns (the conflicting-attachment avoidance).
   {
     printf 'abi <abi/4.0>,\n'
     printf 'include <tunables/global>\n'
-    printf '\n'
-    printf 'profile podman-userns %s flags=(unconfined) {\n' "$PODMAN_BIN"
-    printf '  userns,\n'
-    printf '  include if exists <local/podman-userns>\n'
-    printf '}\n'
   } >"$tmp_profile"
+
+  if ! _system_profile_grants_userns "$PODMAN_BIN"; then
+    printf '\nprofile podman-userns %s flags=(unconfined) {\n  userns,\n  include if exists <local/podman-userns>\n}\n' "$PODMAN_BIN" >>"$tmp_profile"
+  fi
 
   # Optional blocks for the rest of the rootless-Podman binary chain.
   _append_userns_block "$CRUN_BIN" "podman-userns-crun"
