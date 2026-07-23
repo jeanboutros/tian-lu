@@ -128,6 +128,16 @@ The harness addresses specific gaps identified in the register:
 
 GAP-013b (EKS/k3s workload network exposure) remains out of scope and requires validation on the production x86_64 server.
 
-## 9. Implementation
+## 9. Findings
+
+The harness run surfaced a series of root-cause installer bugs and
+rootless-Podman / systemd / AppArmor interactions, each now fixed with a
+regression test. The full root-cause analysis — symptom, mechanism, fix, and
+guard — is recorded in
+[`docs/design/digital-twin-findings.md`](digital-twin-findings.md). The
+short-form actionable rules derived from those findings live in `AGENTS.md`
+→ Critical gotchas.
+
+## 10. Implementation
 
 The build steps for this harness are in [docs/design/digital-twin-testing-plan.md](digital-twin-testing-plan.md).

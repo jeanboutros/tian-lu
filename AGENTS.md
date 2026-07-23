@@ -14,6 +14,7 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
   - `gaps-register.md` — unresolved items requiring runtime testing (open gaps remain; see this file for the current count).
   - `digital-twin-testing-design.md` — design for the Lima digital-twin VM harness that validates `setup-floci.sh` end-to-end.
   - `digital-twin-testing-plan.md` — implementation plan for the digital-twin harness.
+  - `digital-twin-findings.md` — root-cause analysis of every installer bug and rootless-Podman/systemd/AppArmor interaction the twin surfaced (symptom, mechanism, fix, regression guard). Long-form companion to the Critical gotchas below.
 - `docs/scraped/` — scraped Floci documentation (9 pages). Use `docs/scraped/INDEX.md` for keyword-based lookup; it maps topics to specific files.
 - `mock-server/` — Lima digital-twin harness. `lima/floci-twin.yaml` (twin definition), `in-vm/lib/assert.sh` (helpers incl. `run_as_floci_guest`), `in-vm/run-in-vm.sh` (guest driver), `run-test.sh` (host orchestrator), `evidence/` (git-ignored run artifacts). Run with `make twin-test`. See `docs/design/digital-twin-testing-design.md`.
 

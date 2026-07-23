@@ -309,7 +309,12 @@ need it and nothing else.
 This step is idempotent: a re-run detects the already-loaded permitting profile
 (or an already-permissive sysctl) and makes no changes. See GAP items in
 `docs/design/gaps-register.md` if profile naming collides with a
-distribution-shipped Podman profile on a future Ubuntu release.
+distribution-shipped Podman profile on a future Ubuntu release. The
+distribution-shipped-profile conflict, the `newuidmap`/`newgidmap` helper
+profiles, the `abi` boot-load cache interaction, and the per-binary
+detect-and-skip logic were all surfaced and resolved by the digital twin —
+see [`docs/design/digital-twin-findings.md`](digital-twin-findings.md)
+§6 and §8 for the full root-cause analysis.
 
 ## 12. Environment file
 
@@ -437,3 +442,11 @@ In interactive mode, the user can observe the raw curl output at the phase 6 pau
 ## 17. Open items
 
 See `docs/design/gaps-register.md` for unresolved items that require runtime testing to close.
+
+The Lima digital-twin harness surfaced a number of root-cause installer bugs
+and rootless-Podman / systemd / AppArmor interactions during its end-to-end
+run. The full root-cause analysis for each — symptom, mechanism, fix, and the
+test that prevents regression — is recorded in
+[`docs/design/digital-twin-findings.md`](digital-twin-findings.md). The
+actionable short-form rules derived from those findings live in
+`AGENTS.md` → Critical gotchas.
