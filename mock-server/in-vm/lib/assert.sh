@@ -149,6 +149,10 @@ write_sentinel() {
 
 # run_as_floci_guest <cmd> [args...]
 # Drop privileges to the floci user with the same env contract as setup-floci.sh.
+# No trailing `--` before "$@": GNU coreutils 9.4 `env` treats
+# `env VAR=val -- cmd` as if `--` were the command (it only accepts `--`
+# before VAR=val assignments). The installer's run_as_floci has the same
+# shape; the twin surfaces this as an installer bug to report, not patch.
 run_as_floci_guest() {
   local uid
 
@@ -159,7 +163,7 @@ run_as_floci_guest() {
     PATH=/usr/local/bin:/usr/bin:/bin \
     XDG_RUNTIME_DIR="/run/user/${uid}" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-    -- "$@"
+    "$@"
 }
 
 # main

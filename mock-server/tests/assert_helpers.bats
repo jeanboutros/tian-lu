@@ -103,6 +103,6 @@ teardown() {
 @test "run_as_floci_guest constructs the exact floci environment" {
   run bash -c 'source "$ASSERT_LIB"; run_as_floci_guest true'
   [ "$status" -eq 0 ]
-  expected='sudo -u floci env HOME=/home/floci USER=floci PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus -- true'
+  expected='sudo -u floci env HOME=/home/floci USER=floci PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus true'
   [ "$(stub_calls sudo)" = "$expected" ]
 }
