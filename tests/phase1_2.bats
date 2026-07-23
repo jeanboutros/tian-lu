@@ -276,8 +276,9 @@ EOF
      export PASTA_BIN='${TEST_TMP}/pasta-nonexistent'" \
     "assert_userns_allowed"
 
-  # Exact required lines.
-  grep -q 'abi <abi/4.0>,' "$profile_file"
+  # Exact required lines. abi/5.0 matches Ubuntu 26.04+'s system apparmor
+  # profiles — a mismatched abi is skipped by the cached boot reload.
+  grep -q 'abi <abi/5.0>,' "$profile_file"
   grep -q 'include <tunables/global>' "$profile_file"
   grep -q 'flags=(unconfined)' "$profile_file"
   grep -q 'include if exists <local/podman-userns>' "$profile_file"

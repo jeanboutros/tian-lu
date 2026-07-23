@@ -446,9 +446,13 @@ assert_userns_allowed() {
   }
 
   # Write the profile header, then a podman block ONLY if no system profile
-  # grants podman userns (the conflicting-attachment avoidance).
+  # grants podman userns (the conflicting-attachment avoidance). Use abi/5.0
+  # to match Ubuntu 26.04+'s system apparmor profiles — a mismatched abi
+  # (e.g. abi/4.0) is skipped by the cached boot reload, so the profile
+  # loads via manual `apparmor_parser -r` but NOT at boot, breaking reboot
+  # autostart with "newuidmap: write to uid_map failed".
   {
-    printf 'abi <abi/4.0>,\n'
+    printf 'abi <abi/5.0>,\n'
     printf 'include <tunables/global>\n'
   } >"$tmp_profile"
 
