@@ -318,7 +318,7 @@ _install_absent() {
     return 1
   fi
   _guest_ufw_baseline
-  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT bash /opt/tianlu/setup-floci.sh" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "cd / && FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT bash /opt/tianlu/setup-floci.sh" 2>/dev/null
   _install_exec_condition
   managed_hosts_add
   _health_check
