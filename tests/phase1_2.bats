@@ -129,6 +129,41 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
+@test "assert_userns_allowed: no-op when system profile already grants userns (Ubuntu 26.04)" {
+  local sysctl_file="${TEST_TMP}/userns-sysctl"
+  local profile_dir="${TEST_TMP}/apparmor.d"
+  local profiles_file="${TEST_TMP}/no-apparmor-profiles"
+  local fake_podman="${TEST_TMP}/podman"
+  touch "$fake_podman"
+  printf '1\n' >"$sysctl_file"
+
+  # Simulate a system /etc/apparmor.d/podman profile granting userns for the
+  # same binary PODMAN_BIN points at.
+  mkdir -p "$profile_dir"
+  cat >"${profile_dir}/podman" <<EOF
+abi <abi/5.0>,
+include <tunables/global>
+profile podman ${fake_podman} flags=(unconfined) {
+  userns,
+  \@{exec_path} mr,
+}
+EOF
+
+  run _run_fn \
+    "export USERNS_SYSCTL_FILE='${sysctl_file}';
+     export APPARMOR_PROFILES_FILE='${profiles_file}';
+     export APPARMOR_PROFILE_DIR='${profile_dir}';
+     export APPARMOR_USERNS_PROFILE='${profile_dir}/podman-userns';
+     export PODMAN_BIN='${fake_podman}'" \
+    "assert_userns_allowed"
+  [ "$status" -eq 0 ]
+  # apparmor_parser must NOT have been called (no conflicting profile installed).
+  run grep "apparmor_parser" "$STUB_LOG"
+  [ "$status" -ne 0 ]
+  # The conflicting podman-userns file must NOT have been written.
+  [ ! -f "${profile_dir}/podman-userns" ]
+}
+
 @test "assert_userns_allowed: installs profile and calls apparmor_parser when value=1 and not loaded" {
   local sysctl_file="${TEST_TMP}/userns-sysctl"
   local profile_dir="${TEST_TMP}/apparmor.d"
@@ -174,6 +209,11 @@ teardown() {
   [ "$status" -ne 0 ]
   run grep "podman-userns-pasta" "$profile_file"
   [ "$status" -ne 0 ]
+  # newuidmap/newgidmap blocks must NOT be present (binaries don't exist).
+  run grep "newuidmap-userns" "$profile_file"
+  [ "$status" -ne 0 ]
+  run grep "newgidmap-userns" "$profile_file"
+  [ "$status" -ne 0 ]
 
   # HARD PROHIBITION checks.
   # No sysctl call in stub log.
@@ -188,6 +228,32 @@ teardown() {
   local sysctl_val
   sysctl_val="$(cat "$sysctl_file")"
   [[ "$sysctl_val" == "1" ]]
+}
+
+@test "assert_userns_allowed: installs newuidmap/newgidmap userns blocks when helpers exist" {
+  local sysctl_file="${TEST_TMP}/userns-sysctl"
+  local profile_dir="${TEST_TMP}/apparmor.d"
+  local profile_file="${profile_dir}/podman-userns"
+  local profiles_file="${TEST_TMP}/no-apparmor-profiles"
+  local fake_podman="${TEST_TMP}/podman"
+  local fake_newuidmap="${TEST_TMP}/newuidmap"
+  local fake_newgidmap="${TEST_TMP}/newgidmap"
+  printf '1\n' >"$sysctl_file"
+  touch "$fake_podman" "$fake_newuidmap" "$fake_newgidmap"
+
+  run _run_fn \
+    "export USERNS_SYSCTL_FILE='${sysctl_file}';
+     export APPARMOR_PROFILES_FILE='${profiles_file}';
+     export APPARMOR_PROFILE_DIR='${profile_dir}';
+     export APPARMOR_USERNS_PROFILE='${profile_file}';
+     export PODMAN_BIN='${fake_podman}';
+     export NEWUIDMAP_BIN='${fake_newuidmap}';
+     export NEWGIDMAP_BIN='${fake_newgidmap}'" \
+    "assert_userns_allowed"
+  [ "$status" -eq 0 ]
+  [ -f "$profile_file" ]
+  grep -q "profile newuidmap-userns ${fake_newuidmap}" "$profile_file"
+  grep -q "profile newgidmap-userns ${fake_newgidmap}" "$profile_file"
 }
 
 @test "assert_userns_allowed: profile file contains exact podman block" {
@@ -210,8 +276,9 @@ teardown() {
      export PASTA_BIN='${TEST_TMP}/pasta-nonexistent'" \
     "assert_userns_allowed"
 
-  # Exact required lines.
-  grep -q 'abi <abi/4.0>,' "$profile_file"
+  # Exact required lines. abi/5.0 matches Ubuntu 26.04+'s system apparmor
+  # profiles — a mismatched abi is skipped by the cached boot reload.
+  grep -q 'abi <abi/5.0>,' "$profile_file"
   grep -q 'include <tunables/global>' "$profile_file"
   grep -q 'flags=(unconfined)' "$profile_file"
   grep -q 'include if exists <local/podman-userns>' "$profile_file"
@@ -402,6 +469,28 @@ teardown() {
 @test "detect_hostname_and_ip: exits non-zero when both ip and hostname return empty" {
   run _run_fn \
     "export STUB_OUT_IP='';
+     export STUB_OUT_HOSTNAME=''" \
+    "detect_hostname_and_ip"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not detect server IP"* ]]
+}
+
+@test "detect_hostname_and_ip: ip route failure falls through to hostname -I (no set -e abort)" {
+  run _run_fn \
+    "export STUB_RC_IP=2;
+     export STUB_OUT_IP='';
+     export STUB_OUT_HOSTNAME='192.168.5.10 10.0.0.1'" \
+    "detect_hostname_and_ip; printf 'SERVER_IP=%s\n' \"\$SERVER_IP\"; printf 'SERVER_LAN_SUBNET=%s\n' \"\$SERVER_LAN_SUBNET\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SERVER_IP=192.168.5.10"* ]]
+  [[ "$output" == *"SERVER_LAN_SUBNET=192.168.5.0/24"* ]]
+}
+
+@test "detect_hostname_and_ip: both ip and hostname failing exits with the explicit error (not a bare abort)" {
+  run _run_fn \
+    "export STUB_RC_IP=2;
+     export STUB_OUT_IP='';
+     export STUB_RC_HOSTNAME=1;
      export STUB_OUT_HOSTNAME=''" \
     "detect_hostname_and_ip"
   [ "$status" -ne 0 ]

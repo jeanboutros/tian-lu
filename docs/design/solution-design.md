@@ -148,32 +148,36 @@ Quadlet-generated units are **transient** and cannot be `systemctl enable`d (sys
 
 | Directive | Value | Notes |
 |---|---|---|
-| `Image` | `floci/floci:1.5.33-compat` | pinned |
+| `Image` | `docker.io/floci/floci:1.5.33-compat` | pinned; fully-qualified so rootless Podman does not require short-name resolution |
 | `ContainerName` | `tianlu-floci` | must match `FLOCI_HOSTNAME` for Podman DNS |
 | `Network` | `floci-net` | references the network created imperatively in Phase 4 (no `.network` Quadlet, to avoid double-management) |
 | `EnvironmentFile` | `%h/.config/floci/floci.env` | all `FLOCI_*` vars; file is mode `0600`, `floci:floci`, written atomically |
 | `PublishPort` | `4566:4566`, `6379-6399:6379-6399`, `7001-7099:7001-7099` | proxy-in-Floci ports |
 | `Volume` | `%t/podman/podman.sock:/var/run/docker.sock:z` | rootless Podman socket, for sidecar spawning |
 | `Volume` | `%h/floci-data:/app/data:z` | persistent storage |
+| `UserNS` | `keep-id:uid=1001,gid=1001` | the Floci image runs as container uid 1001; without this, rootless Podman's default subuid mapping makes the host bind mount root-owned inside, so the container's `floci` user cannot write `/app/data` → `AccessDeniedException: /app/data/tls` |
 
 `%h` = the user's home (`/home/floci`), `%t` = the runtime dir (`/run/user/<UID>`); Quadlet expands both. The `.container` also sets `After=podman.socket` and `Requires=podman.socket` in its `[Unit]` section — Quadlet does **not** add this automatically, and the socket must be active before the container starts (the mounted `%t/podman/podman.sock` must exist). `podman.socket` is a user-scoped unit enabled separately in Phase 3.
 
 **`[Service]` hardening** (applied to the generated unit):
 
-`NoNewPrivileges`, `ProtectSystem=strict`, **`ReadWritePaths=%h %t`**, `PrivateTmp`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops.
+`NoNewPrivileges`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `SystemCallArchitectures=native`, plus `Restart=on-failure`, `RestartSec=5`, and a start limit of 5 per 60s to prevent crash loops. Only the seccomp-based directives that do not require namespace creation or SUID stripping are kept.
 
-- **`ReadWritePaths` must include `%t`, not only `%h`.** Under `ProtectSystem=strict` the filesystem is read-only except the listed paths. The Podman runtime and the mounted socket live under `/run/user/<UID>` (`%t`); omitting it makes the socket read-only and the container fails to start.
+The filesystem-sandbox directives (`ProtectSystem=strict`, `ReadWritePaths`, `PrivateTmp`, `ProtectKernelTunables`) are excluded: under systemd 259 they make `systemd-executor` create an IMPLICIT user namespace to set up the sandbox, and on Ubuntu 26.04 with `apparmor_restrict_unprivileged_userns=1` AppArmor's `unprivileged_userns` sandbox (no `userns` grant for `systemd-executor`) denies `cap_sys_admin` → `cannot clone: Operation not permitted` → the service fails to start. `PrivateDevices` and `ProtectKernelModules` drop capabilities (`CAP_MKNOD`/`CAP_SYS_RAWIO`, `CAP_SYS_MODULE`) via `PR_CAPBSET_DROP`, which requires `CAP_SETPCAP` the unprivileged user lacks → `status=218/CAPABILITIES`. `RestrictSUIDSGID` strips SUID/SGID bits, which breaks Podman's idmapped layer copy under `UserNS=keep-id` (the copy must preserve the SUID bit on setuid root binaries like `usr/bin/chage`) → `storage-chown-by-maps: chmod usr/bin/chage: operation not permitted`. `ProtectControlGroups` is documented system-service-only in systemd 259 and conflicts with Podman's cgroup management. `MemoryDenyWriteExecute` is excluded (JVM JIT) and `RestrictNamespaces` is excluded (Podman needs namespace creation).
 
 **Directives that must NOT be set** (each breaks rootless Podman or the JVM):
 
 - `MemoryDenyWriteExecute` — Floci is JVM-based and needs write+execute memory pages.
 - `RestrictNamespaces` — Podman must create namespaces for rootless containers.
-- `ProtectHome` — masks `/home` entirely; `ReadWritePaths` cannot override it. The data dir and env file live under `/home/floci`; rely on `0700` permissions instead.
+- `ProtectHome` — masks `/home` entirely; the data dir and env file live under `/home/floci`; rely on `0700` permissions instead.
 - `PrivateNetwork` — breaks rootless container networking.
+- `ProtectSystem`, `ReadWritePaths`, `PrivateTmp`, `ProtectKernelTunables` — trigger `systemd-executor`'s implicit userns (denied under AppArmor userns restriction).
+- `PrivateDevices`, `ProtectKernelModules` — `PR_CAPBSET_DROP` needs `CAP_SETPCAP` the unprivileged user lacks.
+- `ProtectControlGroups` — systemd 259 system-service-only; conflicts with Podman cgroup management.
 
 Quadlet removes the hand-authored lifecycle plumbing the earlier design carried: no `ExecStartPre` stale-container removal, no `ExecStop`, no `--rm` juggling — `--sdnotify=conmon` handles readiness and Quadlet clears a leftover same-name container on start.
 
-**Manual-unit fallback (Podman < 4.4).** If Quadlet is unavailable, write a plain `floci.service` running `podman run` with `Type=notify`, `--sdnotify=conmon`, and `--cidfile=%t/floci.cid` (so `ExecStop` can `podman stop --cidfile %t/floci.cid`), plus `ExecStartPre=-/usr/bin/podman rm -f tianlu-floci` and the identical hardening block including `ReadWritePaths=%h %t`. This is a fallback only; Quadlet is preferred.
+**Manual-unit fallback (Podman < 4.4).** If Quadlet is unavailable, write a plain `floci.service` running `podman run` with `Type=notify`, `--sdnotify=conmon`, and `--cidfile=%t/floci.cid` (so `ExecStop` can `podman stop --cidfile %t/floci.cid`), plus `ExecStartPre=-/usr/bin/podman rm -f tianlu-floci` and the identical seccomp-based hardening block. This is a fallback only; Quadlet is preferred.
 
 ### 9.1 Lingering and user manager readiness
 
@@ -305,7 +309,12 @@ need it and nothing else.
 This step is idempotent: a re-run detects the already-loaded permitting profile
 (or an already-permissive sysctl) and makes no changes. See GAP items in
 `docs/design/gaps-register.md` if profile naming collides with a
-distribution-shipped Podman profile on a future Ubuntu release.
+distribution-shipped Podman profile on a future Ubuntu release. The
+distribution-shipped-profile conflict, the `newuidmap`/`newgidmap` helper
+profiles, the `abi` boot-load cache interaction, and the per-binary
+detect-and-skip logic were all surfaced and resolved by the digital twin —
+see [`docs/design/digital-twin-findings.md`](digital-twin-findings.md)
+§6 and §8 for the full root-cause analysis.
 
 ## 12. Environment file
 
@@ -433,3 +442,11 @@ In interactive mode, the user can observe the raw curl output at the phase 6 pau
 ## 17. Open items
 
 See `docs/design/gaps-register.md` for unresolved items that require runtime testing to close.
+
+The Lima digital-twin harness surfaced a number of root-cause installer bugs
+and rootless-Podman / systemd / AppArmor interactions during its end-to-end
+run. The full root-cause analysis for each — symptom, mechanism, fix, and the
+test that prevents regression — is recorded in
+[`docs/design/digital-twin-findings.md`](digital-twin-findings.md). The
+actionable short-form rules derived from those findings live in
+`AGENTS.md` → Critical gotchas.

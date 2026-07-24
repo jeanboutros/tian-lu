@@ -150,10 +150,10 @@ _source_and_run() {
   grep -q "Network=floci-net" "$FLOCI_QUADLET_FILE"
 }
 
-@test "write_quadlet_unit file contains Image=floci/floci:1.5.33-compat" {
+@test "write_quadlet_unit file contains Image=docker.io/floci/floci:1.5.33-compat" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "Image=floci/floci:1.5.33-compat" "$FLOCI_QUADLET_FILE"
+  grep -q "Image=docker.io/floci/floci:1.5.33-compat" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file contains all three PublishPort lines" {
@@ -176,16 +176,35 @@ _source_and_run() {
   grep -q "Volume=%h/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
 }
 
+@test "write_quadlet_unit file contains UserNS keep-id mapping for the Floci image user" {
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "UserNS=keep-id:uid=1001,gid=1001" "$FLOCI_QUADLET_FILE"
+}
+
 @test "write_quadlet_unit file contains EnvironmentFile with %h specifier" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
   grep -q "EnvironmentFile=%h/.config/floci/floci.env" "$FLOCI_QUADLET_FILE"
 }
 
-@test "write_quadlet_unit file contains ReadWritePaths with both %h and %t" {
+@test "write_quadlet_unit file does NOT contain filesystem-sandbox directives (rootless userns)" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "ReadWritePaths=%h %t" "$FLOCI_QUADLET_FILE"
+  # ProtectSystem, ReadWritePaths, PrivateTmp, ProtectKernelTunables,
+  # PrivateDevices, ProtectKernelModules, ProtectControlGroups are all
+  # excluded — they trigger systemd-executor's implicit userns or capability
+  # drops that AppArmor denies in a rootless user unit. RestrictSUIDSGID is
+  # excluded — it strips SUID/SGID bits, which breaks Podman's idmapped layer
+  # copy under UserNS=keep-id (must preserve SUID on setuid root binaries).
+  run grep -E "ProtectSystem=|ReadWritePaths=|PrivateTmp=|ProtectKernelTunables=|PrivateDevices=|ProtectKernelModules=|ProtectControlGroups=|RestrictSUIDSGID=" "$FLOCI_QUADLET_FILE"
+  [ "$status" -ne 0 ]
+  # The seccomp-based subset that does NOT require namespace creation is kept.
+  grep -q "NoNewPrivileges=true" "$FLOCI_QUADLET_FILE"
+  grep -q "RestrictAddressFamilies=" "$FLOCI_QUADLET_FILE"
+  grep -q "LockPersonality=true" "$FLOCI_QUADLET_FILE"
+  grep -q "RestrictRealtime=true" "$FLOCI_QUADLET_FILE"
+  grep -q "SystemCallArchitectures=native" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file does not contain ProtectHome" {

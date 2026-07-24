@@ -45,7 +45,7 @@ readonly SUBUID_COUNT="${SUBUID_COUNT:-262144}"
 readonly PODMAN_NETWORK="${PODMAN_NETWORK:-floci-net}"
 
 # --- Floci image ---
-readonly FLOCI_IMAGE="${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
+readonly FLOCI_IMAGE="${FLOCI_IMAGE:-docker.io/floci/floci:1.5.33-compat}"
 
 # --- Floci configuration ---
 readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"
@@ -132,6 +132,8 @@ readonly APPARMOR_USERNS_PROFILE="${APPARMOR_USERNS_PROFILE:-${APPARMOR_PROFILE_
 readonly PODMAN_BIN="${PODMAN_BIN:-/usr/bin/podman}"
 readonly CRUN_BIN="${CRUN_BIN:-/usr/bin/crun}"
 readonly PASTA_BIN="${PASTA_BIN:-/usr/bin/pasta}"
+readonly NEWUIDMAP_BIN="${NEWUIDMAP_BIN:-/usr/bin/newuidmap}"
+readonly NEWGIDMAP_BIN="${NEWGIDMAP_BIN:-/usr/bin/newgidmap}"
 
 # --- Sub{uid,gid} files ---
 readonly SUBUID_FILE="${SUBUID_FILE:-/etc/subuid}"
@@ -173,13 +175,18 @@ INTERACTIVE="${INTERACTIVE:-false}"
 run_as_floci() {
   local uid
   uid="$(id -u "$FLOCI_USER")"
+  # No trailing `--` before "$@": GNU coreutils 9.4 `env` treats
+  # `env VAR=val -- cmd` as if `--` were the command (it only accepts `--`
+  # before VAR=val assignments). Dropping the `--` is portable across GNU
+  # and BSD `env`; sudo's own `--` separator is unnecessary here because no
+  # sudo option follows -u <user>.
   sudo -u "$FLOCI_USER" env \
     HOME="$FLOCI_HOME" \
     USER="$FLOCI_USER" \
     PATH="/usr/local/bin:/usr/bin:/bin" \
     XDG_RUNTIME_DIR="/run/user/${uid}" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-    -- "$@"
+    "$@"
 }
 
 # write_quadlet_unit: render the Quadlet .container file for the Floci service.
@@ -199,6 +206,27 @@ run_as_floci() {
 #
 # %h and %t are Quadlet specifiers expanded at runtime by systemd — they must
 # appear literally in the file and must NOT be shell-expanded here.
+#
+# [Service] hardening is the maximal subset safe for a ROOTLESS user unit on
+# Ubuntu 26.04 with AppArmor userns restriction. The seccomp-based directives
+# kept here (NoNewPrivileges, RestrictAddressFamilies, LockPersonality,
+# RestrictRealtime, SystemCallArchitectures) do NOT require namespace creation
+# and do NOT strip SUID/SGID bits. The filesystem-sandbox directives
+# (ProtectSystem=strict, ReadWritePaths, PrivateTmp, ProtectKernelTunables)
+# are excluded: under systemd 259 they make systemd-executor create an IMPLICIT
+# user namespace to set up the sandbox, and AppArmor's unprivileged_userns
+# sandbox (which has no userns grant for systemd-executor) denies cap_sys_admin
+# → "cannot clone: Operation not permitted" → the service fails to start.
+# PrivateDevices and ProtectKernelModules are excluded for the same
+# userns/CAP_SETPCAP reason (status=218/CAPABILITIES). RestrictSUIDSGID is
+# excluded: it strips SUID/SGID bits, which breaks Podman's idmapped layer
+# copy under UserNS=keep-id — the copy must preserve the SUID bit on setuid
+# root binaries (e.g. usr/bin/chage), and stripping it fails with
+# "storage-chown-by-maps: chmod usr/bin/chage: operation not permitted".
+# ProtectControlGroups is documented system-service-only in systemd 259 and
+# conflicts with Podman's cgroup management. MemoryDenyWriteExecute is
+# excluded (JVM JIT) and RestrictNamespaces is excluded (Podman needs
+# namespace creation).
 write_quadlet_unit() {
   run_as_floci mkdir -p "$QUADLET_UNIT_DIR"
 
@@ -229,20 +257,20 @@ EnvironmentFile=%h/.config/floci/floci.env
 ${publish_ports}
 Volume=%t/podman/podman.sock:/var/run/docker.sock:z
 Volume=%h/floci-data:/app/data:z
+# UserNS keep-id:uid=1001,gid=1001 — the Floci image runs as container uid
+# 1001 (gid 0); rootless Podman's default subuid mapping maps host floci
+# (1000) to container root (0), so a host bind mount of /home/floci/floci-data
+# is root-owned inside the container and the container's floci user (1001)
+# cannot write to /app/data (java.nio.file.AccessDeniedException: /app/data/tls).
+# keep-id:uid=1001,gid=1001 maps host floci (1000) to container floci (1001),
+# keeping the host dir owned by floci while making it writable inside.
+UserNS=keep-id:uid=1001,gid=1001
 
 [Service]
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=%h %t
-PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=true
 RestrictRealtime=true
-RestrictSUIDSGID=true
 SystemCallArchitectures=native
 Restart=on-failure
 RestartSec=5
@@ -334,6 +362,28 @@ assert_ubuntu_version() {
   fi
 }
 
+# _system_profile_grants_userns <binary>: return 0 if any profile under
+# $APPARMOR_PROFILE_DIR attaches to <binary> and contains a `userns,` rule.
+# Used to detect Ubuntu 26.04+'s bundled podman/crun/pasta profiles so we do
+# NOT install a conflicting second profile on the same binary (which would
+# break userns creation — see assert_userns_allowed).
+_system_profile_grants_userns() {
+  local binary="$1"
+  local profile_file
+  [[ -d "$APPARMOR_PROFILE_DIR" ]] || return 1
+  while IFS= read -r profile_file; do
+    # Skip our own profile (not yet installed, but defensive).
+    [[ "$profile_file" == "$APPARMOR_USERNS_PROFILE" ]] && continue
+    awk -v bin="$binary" '
+      $0 ~ "profile[[:space:]]+[^[:space:]]+[[:space:]]+" bin "([[:space:]]|$)" { in_prof=1 }
+      in_prof && /^[[:space:]]*userns[[:space:]]*,/ { found=1 }
+      in_prof && /^}/ { in_prof=0 }
+      END { exit found ? 0 : 1 }
+    ' "$profile_file" 2>/dev/null && return 0
+  done < <(grep -rl "$binary" "$APPARMOR_PROFILE_DIR" 2>/dev/null)
+  return 1
+}
+
 # assert_userns_allowed: ensure AppArmor permits rootless user namespaces.
 #
 # If the kernel sysctl that restricts unprivileged userns is absent or not set
@@ -354,11 +404,27 @@ assert_userns_allowed() {
     return 0
   fi
 
-  # Value is 1: check if the permitting profile is already loaded.
-  if [[ -f "$APPARMOR_PROFILES_FILE" ]] \
-    && grep -q 'podman-userns' "$APPARMOR_PROFILES_FILE"; then
-    return 0
-  fi
+  # Value is 1. Determine which binaries in the rootless-Podman chain still
+  # need a userns-granting profile. Ubuntu 26.04+'s apparmor-profiles package
+  # ships profiles for podman/crun/pasta but NOT for newuidmap/newgidmap.
+  # Attaching a SECOND profile to a binary that already has one creates a
+  # conflicting attachment — AppArmor then transitions that binary into the
+  # restrictive unprivileged_userns sandbox on userns creation, denying the
+  # re-exec (podman: "failed to reexec: Permission denied"). So each binary
+  # gets a block ONLY if no system profile already grants it userns.
+  #
+  # If the permitting profile set is already fully loaded (every chain binary
+  # covered), there is nothing to install — short-circuit.
+  local need_install=false
+  for bin in "$PODMAN_BIN" "$CRUN_BIN" "$PASTA_BIN" "$NEWUIDMAP_BIN" "$NEWGIDMAP_BIN"; do
+    [[ -f "$bin" ]] || continue
+    if ! _system_profile_grants_userns "$bin" \
+      && ! grep -q 'podman-userns' "${APPARMOR_PROFILES_FILE:-/dev/null}" 2>/dev/null; then
+      need_install=true
+      break
+    fi
+  done
+  [[ "$need_install" == true ]] || return 0
 
   # Install the AppArmor profile.
   mkdir -p "$APPARMOR_PROFILE_DIR"
@@ -366,35 +432,39 @@ assert_userns_allowed() {
   local tmp_profile
   tmp_profile="${APPARMOR_USERNS_PROFILE}.tmp.$$"
 
-  # Write the mandatory podman block (specifiers literal, not shell-expanded
-  # except for the path token in the profile line).
+  # Helper: append a userns-granting block for a binary if it exists on disk
+  # AND no system profile already grants it userns (avoid conflicting
+  # attachments — see above). Ubuntu 26.04 ships profiles for podman/crun/pasta
+  # but NOT for newuidmap/newgidmap, so those helpers get a block; without it,
+  # rootless Podman fails at boot with
+  # "newuidmap: write to uid_map failed: Operation not permitted".
+  _append_userns_block() {
+    local bin="$1" name="$2"
+    [[ -f "$bin" ]] || return 0
+    _system_profile_grants_userns "$bin" && return 0
+    printf '\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n' "$name" "$bin" >>"$tmp_profile"
+  }
+
+  # Write the profile header, then a podman block ONLY if no system profile
+  # grants podman userns (the conflicting-attachment avoidance). Use abi/5.0
+  # to match Ubuntu 26.04+'s system apparmor profiles — a mismatched abi
+  # (e.g. abi/4.0) is skipped by the cached boot reload, so the profile
+  # loads via manual `apparmor_parser -r` but NOT at boot, breaking reboot
+  # autostart with "newuidmap: write to uid_map failed".
   {
-    printf 'abi <abi/4.0>,\n'
+    printf 'abi <abi/5.0>,\n'
     printf 'include <tunables/global>\n'
-    printf '\n'
-    printf 'profile podman-userns %s flags=(unconfined) {\n' "$PODMAN_BIN"
-    printf '  userns,\n'
-    printf '  include if exists <local/podman-userns>\n'
-    printf '}\n'
   } >"$tmp_profile"
 
-  # Optional crun block (only if the binary exists on disk).
-  if [[ -f "$CRUN_BIN" ]]; then
-    {
-      printf '\nprofile podman-userns-crun %s flags=(unconfined) {\n' "$CRUN_BIN"
-      printf '  userns,\n'
-      printf '}\n'
-    } >>"$tmp_profile"
+  if ! _system_profile_grants_userns "$PODMAN_BIN"; then
+    printf '\nprofile podman-userns %s flags=(unconfined) {\n  userns,\n  include if exists <local/podman-userns>\n}\n' "$PODMAN_BIN" >>"$tmp_profile"
   fi
 
-  # Optional pasta block.
-  if [[ -f "$PASTA_BIN" ]]; then
-    {
-      printf '\nprofile podman-userns-pasta %s flags=(unconfined) {\n' "$PASTA_BIN"
-      printf '  userns,\n'
-      printf '}\n'
-    } >>"$tmp_profile"
-  fi
+  # Optional blocks for the rest of the rootless-Podman binary chain.
+  _append_userns_block "$CRUN_BIN" "podman-userns-crun"
+  _append_userns_block "$PASTA_BIN" "podman-userns-pasta"
+  _append_userns_block "$NEWUIDMAP_BIN" "newuidmap-userns"
+  _append_userns_block "$NEWGIDMAP_BIN" "newgidmap-userns"
 
   chmod 0644 "$tmp_profile"
   mv -f "$tmp_profile" "$APPARMOR_USERNS_PROFILE"
@@ -407,11 +477,11 @@ detect_hostname_and_ip() {
   # Primary: extract the token after "src" from the ip-route output using awk
   # (awk does its own whitespace splitting, immune to global IFS=$'\n\t').
   SERVER_IP="$(ip route get 1.1.1.1 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
 
   # Fallback: first field from hostname -I (also via awk for IFS-safety).
   if [[ -z "$SERVER_IP" ]]; then
-    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   fi
 
   if [[ -z "$SERVER_IP" ]]; then
@@ -855,7 +925,6 @@ main() {
   # Phase 1: Preflight
   assert_root_or_sudo
   assert_ubuntu_version
-  assert_userns_allowed
   detect_hostname_and_ip
   phase_pause
 
@@ -867,6 +936,11 @@ main() {
 
   # Phase 3: Podman setup
   install_podman
+  # assert_userns_allowed runs AFTER install_podman so the newuidmap/newgidmap
+  # binaries exist on every run — otherwise the helper profile blocks are
+  # gated out on Run-1 (binaries absent) but written on Run-2 (binaries
+  # present from Run-1's install_podman), breaking semantic convergence.
+  assert_userns_allowed
   enable_lingering
   configure_xdg_runtime_dir
   start_podman_socket

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && "${2:-}" == "floci" ]]; then
+  printf '1001\n'
+  exit 0
+fi
+exec /usr/bin/id "$@"

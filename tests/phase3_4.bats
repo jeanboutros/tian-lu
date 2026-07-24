@@ -246,5 +246,5 @@ teardown() {
      export STUB_OUT_ID='1001'" \
     "pull_floci_image"
   [ "$status" -eq 0 ]
-  grep -q "pull floci/floci:1.5.33-compat" "$STUB_LOG"
+  grep -q "pull docker.io/floci/floci:1.5.33-compat" "$STUB_LOG"
 }

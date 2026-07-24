@@ -1,0 +1,123 @@
+# ===================================================================== #
+# Lima digital-twin definition for the Floci Ubuntu installer
+# ===================================================================== #
+# An arm64 Ubuntu integration twin that faithfully exercises the installer's
+# control-plane behavior: systemd-logind, lingering, rootless Podman,
+# AppArmor enforcement, Quadlet generation, UFW/nftables rule generation, and
+# reboot autostart. See docs/design/digital-twin-testing-design.md for the
+# fidelity framing and docs/design/digital-twin-testing-plan.md for the build.
+#
+# Pinned to Ubuntu 26.04 (Resolute Raccoon). The 24.04 fallback in §4.1 of the
+# plan is not needed because 26.04 arm64 is published in the bundled Lima
+# templates; if a future Lima drop removes 26.04, fall back to 24.04 LTS arm64
+# and record the choice here.
+
+minimumLimaVersion: 2.0.0
+
+# --- VM type & architecture ------------------------------------------ #
+# qemu, not vz: the macOS Virtualization.framework (vz) backend blocks
+# unprivileged user-namespace creation inside the guest (unshare -rU fails
+# with EPERM on /proc/self/uid_map for every unprivileged user, even with
+# the podman-userns AppArmor profile loaded). Rootless Podman fundamentally
+# requires unprivileged userns, so it cannot run inside a vz-backed twin.
+# QEMU (full emulation) permits unprivileged userns inside the guest, so
+# rootless Podman works. Tradeoff: slower boot/run than vz.
+vmType: qemu
+arch: aarch64
+
+# --- Resources ------------------------------------------------------- #
+cpus: 4
+memory: 8GiB
+disk: 30GiB
+
+# --- Mount type ------------------------------------------------------ #
+# 9p (QEMU virtio-9p) is pinned so guest writes to the evidence mount do
+# not traverse guest TCP/IP and survive UFW enable — SSH-independent by
+# design. virtiofs would be preferred but requires vmType: vz on macOS,
+# and vz blocks unprivileged userns (see the vmType note above). 9p is the
+# non-SSH mount transport available under qemu.
+mountType: 9p
+
+# --- Rosetta (diagnostic-only, NOT required for the gating path) ----- #
+# On aarch64 host + aarch64 guest, Rosetta is not needed to run the native
+# arm64 Floci image or the arm64 Lambda sidecar. Rosetta requires vmType: vz,
+# so under qemu the optional x86_64 diagnostic Lambda lane is not available;
+# the gating arm64 path is unaffected.
+
+# --- Images ---------------------------------------------------------- #
+# Ubuntu 26.04 LTS (Resolute Raccoon) arm64 — matches the production target.
+# The installer is arch-agnostic bash; its install_podman() / assert_userns_allowed
+# paths are genuinely exercised because a stock 26.04 cloud image does NOT ship
+# podman or the podman-userns AppArmor profile (verified: preflight reports
+# podman-absent and podman-userns-absent on a fresh image).
+base:
+- template:_images/ubuntu-26.04
+
+# --- Mounts ---------------------------------------------------------- #
+# Override the default home mount. Mount the repo read-only at /opt/tianlu
+# (the installer runs from there) and a host evidence dir read-write at
+# /opt/twin-evidence. The host evidence path is OUTSIDE the repo (default
+# ~/.cache/tianlu-twin/evidence) so evidence never enters git.
+#
+# The repo location is overridden at create time via a yq expression
+# (--set='.mounts[0].location="<abs path>"'); there is no builtin template
+# variable for an arbitrary host path, so the orchestrator must pass it.
+# The default below is a placeholder absolute path that keeps
+# `limactl validate` happy and is always overridden in practice.
+mounts:
+- location: "/Users/placeholder/tianlu"
+  mountPoint: /opt/tianlu
+  writable: false
+- location: "{{.Home}}/.cache/tianlu-twin/evidence"
+  mountPoint: /opt/twin-evidence
+  writable: true
+
+# --- User ------------------------------------------------------------ #
+# Lima-managed admin user with NOPASSWD sudo. The installer is invoked as
+# `sudo /opt/tianlu/setup-floci.sh` from this account.
+user:
+  passwordlessSudo: true
+
+# --- SSH ------------------------------------------------------------- #
+# SSH is not used for orchestration (the driver runs via systemd-run and
+# reports through the virtiofs mount). Leave Lima's defaults in place;
+# `limactl shell` works over vsock and does not depend on the evidence path.
+
+# --- Provisioning --------------------------------------------------- #
+# Install ONLY operator prerequisites that a stock Ubuntu Server has and
+# that the installer asserts (not installs). The installer MUST exercise
+# install_podman(), so podman/uidmap/passt/containers-common/slirp4netns
+# are deliberately ABSENT.
+provision:
+# apt update + install the exact operator-prereq set. mode: system runs as root.
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates apparmor apparmor-utils ufw nftables
+    # Defensive: ensure packages the installer owns are NOT pre-installed,
+    # so the twin genuinely exercises install_podman(). Best-effort purge
+    # only; if apt marks them manual, the installer's own presence check
+    # still drives the install path.
+    apt-get purge -y --auto-remove podman uidmap passt containers-common slirp4netns 2>/dev/null || true
+    rm -rf /var/lib/apt/lists/*
+
+# --- Readiness probe ------------------------------------------------- #
+# Wait for systemd to be usable before the host orchestrator launches the
+# driver. Runs in user mode.
+probes:
+- mode: readiness
+  description: systemd user manager reachable
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    timeout 60s bash -c 'until systemctl is-system-running >/dev/null 2>&1 || systemctl is-active default.target >/dev/null 2>&1; do sleep 2; done'
+
+# --- Containerd ------------------------------------------------------ #
+# Not needed: the twin runs rootless Podman via the installer, not containerd.
+containerd:
+  system: false
+  user: false
