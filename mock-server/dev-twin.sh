@@ -313,7 +313,7 @@ _install_absent() {
       return 1
     fi
   fi
-  limactl start --name="$DEV_TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" "$DEV_TEMPLATE"
+  limactl start --name="$DEV_TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" --tty=false "$DEV_TEMPLATE"
   _wait_running "$DEV_START_BUDGET_FIRST"
   verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
   limactl shell "$DEV_TWIN_NAME" -- sudo chmod 1777 /mnt/lima-floci-dev-data
@@ -341,7 +341,7 @@ dev_up() {
       ;;
     Stopped)
       preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
-      limactl start "$DEV_TWIN_NAME"
+      limactl start --tty=false "$DEV_TWIN_NAME"
       _wait_running "$DEV_START_BUDGET_RESUME"
       verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
       _start_service
