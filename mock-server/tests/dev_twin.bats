@@ -251,10 +251,11 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
     assert_preconditions() { :; }
     dev_instance_state() { printf 'Stopped\\n'; }
     verify_disk_mount() { return 0; }
+    _start_service() { :; }
     dev_up 2>&1
   "
   [ "$status" -eq 0 ]
-  grep -q 'limactl start floci-dev' "$STUB_LOG"
+  grep -q 'limactl start --tty=false floci-dev' "$STUB_LOG"
   ! grep -q 'setup-floci.sh' "$STUB_LOG"
 }
 
