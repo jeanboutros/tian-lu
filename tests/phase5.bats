@@ -46,7 +46,7 @@ teardown() {
 }
 
 _stat_mode() {
-  stat -f '%A' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%A' "$1"
 }
 
 # ===========================================================================
@@ -149,13 +149,13 @@ _stat_mode() {
   [ "$status" -eq 0 ]
 
   local inode_before
-  inode_before="$(stat -f '%i' "$HOSTS_FILE" 2>/dev/null || stat -c '%i' "$HOSTS_FILE")"
+  inode_before="$(stat -c '%i' "$HOSTS_FILE" 2>/dev/null || stat -f '%i' "$HOSTS_FILE")"
 
   run _run_fn "" "add_hosts_entry"
   [ "$status" -eq 0 ]
 
   local inode_after
-  inode_after="$(stat -f '%i' "$HOSTS_FILE" 2>/dev/null || stat -c '%i' "$HOSTS_FILE")"
+  inode_after="$(stat -c '%i' "$HOSTS_FILE" 2>/dev/null || stat -f '%i' "$HOSTS_FILE")"
 
   [ "$inode_before" = "$inode_after" ]
 }

@@ -154,7 +154,11 @@ EOF
      export APPARMOR_PROFILES_FILE='${profiles_file}';
      export APPARMOR_PROFILE_DIR='${profile_dir}';
      export APPARMOR_USERNS_PROFILE='${profile_dir}/podman-userns';
-     export PODMAN_BIN='${fake_podman}'" \
+     export PODMAN_BIN='${fake_podman}';
+     export CRUN_BIN='${TEST_TMP}/crun-nonexistent';
+     export PASTA_BIN='${TEST_TMP}/pasta-nonexistent';
+     export NEWUIDMAP_BIN='${TEST_TMP}/newuidmap-nonexistent';
+     export NEWGIDMAP_BIN='${TEST_TMP}/newgidmap-nonexistent'" \
     "assert_userns_allowed"
   [ "$status" -eq 0 ]
   # apparmor_parser must NOT have been called (no conflicting profile installed).
@@ -188,7 +192,9 @@ EOF
      export APPARMOR_USERNS_PROFILE='${profile_file}';
      export PODMAN_BIN='${fake_podman}';
      export CRUN_BIN='${fake_crun}';
-     export PASTA_BIN='${fake_pasta}'" \
+     export PASTA_BIN='${fake_pasta}';
+     export NEWUIDMAP_BIN='${TEST_TMP}/newuidmap-nonexistent';
+     export NEWGIDMAP_BIN='${TEST_TMP}/newgidmap-nonexistent'" \
     "assert_userns_allowed"
   [ "$status" -eq 0 ]
 

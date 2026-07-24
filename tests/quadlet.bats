@@ -134,7 +134,7 @@ _source_and_run() {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
   local mode
-  mode="$(stat -f '%A' "$FLOCI_QUADLET_FILE" 2>/dev/null || stat -c '%a' "$FLOCI_QUADLET_FILE")"
+  mode="$(stat -c '%a' "$FLOCI_QUADLET_FILE" 2>/dev/null || stat -f '%A' "$FLOCI_QUADLET_FILE")"
   [ "$mode" = "644" ]
 }
 
