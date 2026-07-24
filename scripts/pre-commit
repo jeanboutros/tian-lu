@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: run lint + unit tests (tiers 1–2) on every commit.
+# Fast (seconds). The end-to-end twin (tier 3, ~15–30 min) is intentionally
+# NOT run here — run `make twin-test` manually before pushing, or let CI
+# run it. See docs/testing-guide.md.
+#
+# Install (one-time per clone):
+#   cp scripts/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Bypass in an emergency: git commit --no-verify (CI still enforces).
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Only run if the installer or harness is staged — skip on docs-only commits.
+if ! git diff --cached --name-only | grep -qE '^(setup-floci\.sh|mock-server/|tests/|Makefile)'; then
+  exit 0
+fi
+
+printf '[pre-commit] running make lint ...\n' >&2
+if ! make lint; then
+  printf '[pre-commit] FAIL: make lint. Fix shellcheck/bash -n findings, then re-stage.\n' >&2
+  exit 1
+fi
+
+printf '[pre-commit] running make test ...\n' >&2
+if ! make test; then
+  printf '[pre-commit] FAIL: make test. Fix the failing bats tests, then re-stage.\n' >&2
+  exit 1
+fi
+
+# Remind (do not block) to run the twin before pushing if setup-floci.sh or
+# the harness changed — the twin catches real runtime bugs tiers 1–2 miss.
+if git diff --cached --name-only | grep -qE '^(setup-floci\.sh|mock-server/)'; then
+  # shellcheck disable=SC2016  # backticks are literal text, not substitution
+  printf '[pre-commit] reminder: run `make twin-test` before pushing (catches runtime bugs lint+unit miss).\n' >&2
+fi
+
+printf '[pre-commit] OK\n' >&2
+exit 0

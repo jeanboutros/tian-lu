@@ -141,6 +141,10 @@ make check               # both
 make twin-test            # build + drive the Lima digital twin (Apple Silicon, macOS 13+)
 ```
 
+For the full guide — the three test tiers, how to run each, and how to wire
+them to run automatically after every change to `setup-floci.sh` (pre-commit
+hook + GitHub Actions) — see [`docs/testing-guide.md`](docs/testing-guide.md).
+
 Podman/systemd/UFW behaviour is exercised two ways: the `tests/` bats suite
 mocks those commands for fast unit feedback, and the **Lima digital twin**
 (`mock-server/run-test.sh`) runs the installer end-to-end inside a headless
@@ -165,6 +169,7 @@ on an x86_64 host. See
 | `docs/design/digital-twin-testing-design.md` | Digital-twin VM harness design. |
 | `docs/design/digital-twin-testing-plan.md` | Digital-twin implementation plan. |
 | `docs/design/gaps-register.md` | Open items requiring runtime testing. |
+| `docs/testing-guide.md` | How to run the three test tiers + wire them to run after every `setup-floci.sh` change. |
 | `docs/scraped/INDEX.md` | Keyword map of scraped Floci documentation. |
 | `mock-server/` | Lima digital-twin harness (twin definition, guest driver, host orchestrator, evidence). |
 
