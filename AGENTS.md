@@ -20,9 +20,12 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 - `scripts/pre-commit` — pre-commit hook (lint + unit tests); install with `cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
 - `.github/workflows/test.yml` — CI: lint+unit on every push/PR only (twin is a local pre-push gate — see `docs/testing-guide.md`).
 - `mock-server/` — Lima digital-twin harness. `lima/floci-twin.yaml` (twin definition), `in-vm/lib/assert.sh` (helpers incl. `run_as_floci_guest`), `in-vm/run-in-vm.sh` (guest driver), `run-test.sh` (host orchestrator), `evidence/` (git-ignored run artifacts). Run with `make twin-test`. See `docs/design/digital-twin-testing-design.md`.
+- `mock-server/dev-twin.sh` — persistent local dev lifecycle script (`make dev-up`, `dev-down`, `dev-status`, `dev-shell`, `dev-recreate`, `dev-reset`, `dev-env`). Uses a separate `floci-dev` Lima instance; shares no state with the test twin (`floci-twin`).
+- `mock-server/lima/floci-dev.yaml` — Lima template for the persistent dev VM (Ubuntu 26.04 arm64 QEMU, standalone `floci-dev-data` disk, all service ports forwarded to `127.0.0.1`; Lambda Runtime API ports 9200-9299 are **not** forwarded).
 
 ## Critical gotchas
 
+- **`make dev-up` does NOT rerun the installer on an existing VM.** It only starts the VM and verifies Floci health. Use `make dev-recreate` to rebuild the OS from the current checkout while retaining the `floci-dev-data` data disk.
 - **The Podman container must be named `tianlu-floci`** (matching `FLOCI_HOSTNAME`). Podman container DNS resolves the `--name` flag, not `FLOCI_HOSTNAME`. If they don't match, Lambda callback URLs and sidecar DNS resolution silently fail.
 - **`FLOCI_STORAGE_PERSISTENT_PATH` is a container-side path** (`/app/data`), not a host path. The host path goes in `FLOCI_STORAGE_HOST_PERSISTENT_PATH` and is bind-mounted to the container path. Confusing these breaks persistence silently.
 - **The Quadlet must set `UserNS=keep-id:uid=1001,gid=1001`.** The Floci image runs as container uid 1001 (gid 0). Rootless Podman's default subuid mapping maps host `floci` (uid 1000) to container root (uid 0), so a host bind mount of `/home/floci/floci-data` is root-owned inside the container and the container's `floci` user (1001) cannot write to `/app/data` → `java.nio.file.AccessDeniedException: /app/data/tls` and Floci fails to start. `keep-id:uid=1001,gid=1001` maps host `floci` (1000) to container `floci` (1001), keeping the host dir owned by `floci` while making it writable inside.

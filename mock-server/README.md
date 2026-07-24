@@ -1,5 +1,40 @@
 # Lima digital-twin harness
 
+## Persistent local development environment
+
+A separate persistent dev environment is available for interactive local AWS development — distinct from the disposable test twin below.
+
+| Target | What it does |
+| --- | --- |
+| `make dev-up` | Create or resume the dev VM; installs Floci only on first creation (QEMU backend) |
+| `make dev-down` | Stop the VM; data preserved |
+| `make dev-status` | Show instance, disk, service, and health state |
+| `make dev-shell` | Open a shell inside the VM |
+| `make dev-env` | Configure AWS CLI `floci-dev` profile and print export instructions |
+| `make dev-recreate` | Rebuild VM OS; retain the `floci-dev-data` data disk |
+| `make dev-reset CONFIRM=reset` | Delete VM **and** data disk — permanent |
+
+**Important**: `make dev-up` does **not** rerun the installer on an existing VM. Use `make dev-recreate` to rebuild the OS from the current checkout while retaining data.
+
+Quick start:
+```bash
+brew install lima qemu
+make dev-up
+eval "$(make dev-env -- --export)"   # load AWS_PROFILE, AWS_ENDPOINT_URL, AWS_DEFAULT_REGION
+aws s3 ls                             # uses https://tianlu-floci:4566 with self-signed TLS
+```
+
+To inspect rootless Podman inside the VM:
+```bash
+make dev-shell
+# inside the VM:
+sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/$(id -u floci) podman ps
+```
+
+---
+
+## Test twin (disposable, for CI validation)
+
 A fully-scripted, headless **Lima VM running Ubuntu (arm64)** that reproduces
 the production server's OS, `systemd`, rootless Podman, AppArmor, and UFW —
 used to validate `setup-floci.sh` end-to-end before it runs on the real
@@ -18,8 +53,7 @@ for the full fidelity framing.
 
 ## Prerequisites
 
-- macOS **13+** on **Apple Silicon** (the `vz` backend and the arm64 guest
-  image require it).
+- macOS **13+** on **Apple Silicon** (the test twin uses **QEMU** full emulation — this allows rootless user-namespace creation inside the guest, which the Virtualization.framework backend blocks).
 - Lima: `brew install lima`.
 - `shellcheck` and `bats-core` for the unit tests (`brew install shellcheck bats-core`).
 
