@@ -2,7 +2,7 @@
 
 This guide explains the three test tiers, how to run each, and how to wire
 them so they run automatically after **every change to `setup-floci.sh`** —
-locally before a commit (pre-commit hook) and remotely on push (CI).
+locally before a commit (pre-commit hook) and before pushing (`make twin-test`).
 
 For the design of each tier see:
 - Unit tests — `tests/` (mocked, fast; pattern documented in `AGENTS.md`).
@@ -102,7 +102,7 @@ A git pre-commit hook runs tiers 1 and 2 on every commit. They are fast
 (seconds) and catch most logic regressions locally before the slow twin run.
 Tier 3 is intentionally **not** in the pre-commit hook (15–30 min is too
 slow for an interactive commit); run `make twin-test` manually before
-pushing, or let CI run it.
+pushing.
 
 To install the hook (one-time, per clone):
 
@@ -123,24 +123,26 @@ still enforce).
 
 ### 3.2 Remote — GitHub Actions CI
 
-`.github/workflows/test.yml` runs on push and pull request. It has two jobs:
+`.github/workflows/test.yml` has one hosted job: `lint-and-unit`.
 
 - **lint-and-unit** (runs on every push/PR, ~30 s): `make lint` + `make test`
   on an Ubuntu runner. This is the always-on gate.
-- **twin** (runs on push/PR that touch `setup-floci.sh`, `mock-server/**`,
-  `tests/**`, or the Makefile, ~20 min): `make twin-test` on a macOS 14
-  Apple Silicon runner with Lima + QEMU. Uses `--fresh --destroy` so each
-  run is clean and leaves no VM behind. Uploads the evidence bundle as a CI
-  artifact for inspection on failure.
 
-The `twin` job's `paths` filter keeps it from running on docs-only changes.
-Both jobs must pass for a PR to merge (enable branch protection → required
-status checks → `lint-and-unit` and `twin`).
+The twin is **not** in hosted CI. GitHub's `macos-14` runner is M1, and
+Apple's Virtualization.framework does not expose nested virtualisation to M1
+runner VMs, so QEMU fails immediately with `HV_UNSUPPORTED`. Nested virt on
+Apple silicon needs M3+ and macOS 15+, which GitHub's hosted fleet does not
+offer yet.
 
-> The `twin` job requires a macOS runner with Lima + QEMU. On a free GitHub
-> plan the macOS minutes are limited; if cost is a concern, run
-> `make twin-test` locally before pushing and keep CI on lint+unit only
-> (delete the `twin` job from the workflow).
+Run `make twin-test` locally before pushing any `setup-floci.sh` or harness
+change.
+
+Future path: a self-hosted x86_64 Linux runner with `/dev/kvm` could run the
+twin in CI. The harness is portable; install `lima` + `qemu` on the runner and
+point the job at a self-hosted `ubuntu-latest` machine.
+
+Enable branch protection → required status checks → `lint-and-unit` (the only
+hosted CI job).
 
 ---
 
@@ -161,7 +163,7 @@ status checks → `lint-and-unit` and `twin`).
   must be validated on the x86_64 server.
 
 So: **edit `setup-floci.sh` → `make check` (lint+unit) locally → commit →
-`make twin-test` locally or let CI run it → push.** If the twin passes, the
+`make twin-test` locally → push.** If the twin passes, the
 installer's control-plane behavior is validated for the production server's
 OS stack; only x86_64-runtime specifics remain to check on the real server.
 
@@ -212,4 +214,4 @@ ls -dt mock-server/evidence/*/ | head -1
 | `setup-floci.sh` (any phase) | `make check` → `make twin-test` |
 | `mock-server/**` (harness) | `make check` → `make twin-test` |
 | `tests/**` (unit tests) | `make test` |
-| `docs/**` only | nothing (CI skips the twin job on docs-only paths) |
+| `docs/**` only | nothing (no twin run needed; CI runs lint+unit regardless of path) |

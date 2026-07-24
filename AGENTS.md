@@ -16,9 +16,9 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
   - `digital-twin-testing-plan.md` — implementation plan for the digital-twin harness.
   - `digital-twin-findings.md` — root-cause analysis of every installer bug and rootless-Podman/systemd/AppArmor interaction the twin surfaced (symptom, mechanism, fix, regression guard). Long-form companion to the Critical gotchas below.
 - `docs/scraped/` — scraped Floci documentation (9 pages). Use `docs/scraped/INDEX.md` for keyword-based lookup; it maps topics to specific files.
-- `docs/testing-guide.md` — the three test tiers (lint, stubbed unit, Lima twin) and how to wire them to run after every `setup-floci.sh` change (pre-commit hook + GitHub Actions).
+- `docs/testing-guide.md` — the three test tiers (lint, stubbed unit, Lima twin) and how to wire them to run after every `setup-floci.sh` change (pre-commit hook; the twin runs locally — CI covers lint+unit only).
 - `scripts/pre-commit` — pre-commit hook (lint + unit tests); install with `cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
-- `.github/workflows/test.yml` — CI: lint+unit on every push/PR; Lima twin on pushes touching the installer/harness.
+- `.github/workflows/test.yml` — CI: lint+unit on every push/PR only (twin is a local pre-push gate — see `docs/testing-guide.md`).
 - `mock-server/` — Lima digital-twin harness. `lima/floci-twin.yaml` (twin definition), `in-vm/lib/assert.sh` (helpers incl. `run_as_floci_guest`), `in-vm/run-in-vm.sh` (guest driver), `run-test.sh` (host orchestrator), `evidence/` (git-ignored run artifacts). Run with `make twin-test`. See `docs/design/digital-twin-testing-design.md`.
 
 ## Critical gotchas
@@ -63,7 +63,7 @@ Local tests run on macOS; the Ubuntu-only runtime (Podman/systemd/UFW) is mocked
 - `make twin-test` — runs `mock-server/run-test.sh`, the Lima digital-twin harness. Requires Lima + QEMU on Apple Silicon (macOS 13+). Builds/boots a headless Ubuntu arm64 VM, runs `setup-floci.sh` inside it, drives it to a live Floci + an arm64 Lambda sidecar, re-runs for idempotency (semantic convergence), optionally reboots for boot-autostart + Quadlet ordering, and writes a manifest-validated evidence bundle. The twin is an arm64 integration twin; architecture-specific Floci/sidecar runtime behavior on x86_64 is out of scope. See `docs/design/digital-twin-testing-design.md`.
 - The script is **sourceable** (guarded `main` at the bottom: `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi`) so bats can load functions without executing them.
 - Runtime behaviour that cannot be mocked is covered by the Lima digital twin (`make twin-test`); remaining x86_64-runtime-specific gaps are tracked in `docs/design/gaps-register.md`.
-- **Run after every change to `setup-floci.sh`:** `make check` (fast, local) before commit, `make twin-test` before push. The pre-commit hook (`scripts/pre-commit`) runs lint+unit automatically; CI (`.github/workflows/test.yml`) runs lint+unit on every push and the twin on installer/harness changes. See `docs/testing-guide.md` for the full guide.
+- **Run after every change to `setup-floci.sh`:** `make check` (fast, local) before commit, `make twin-test` before push. The pre-commit hook (`scripts/pre-commit`) runs lint+unit automatically; CI (`.github/workflows/test.yml`) runs lint+unit on every push/PR. Run `make twin-test` locally before pushing installer changes. See `docs/testing-guide.md` for the full guide.
 
 ## Target environment
 

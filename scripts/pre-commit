@@ -2,8 +2,7 @@
 #
 # Pre-commit hook: run lint + unit tests (tiers 1–2) on every commit.
 # Fast (seconds). The end-to-end twin (tier 3, ~15–30 min) is intentionally
-# NOT run here — run `make twin-test` manually before pushing, or let CI
-# run it. See docs/testing-guide.md.
+# NOT run here — run `make twin-test` manually before pushing. See docs/testing-guide.md.
 #
 # Install (one-time per clone):
 #   cp scripts/pre-commit .git/hooks/pre-commit
