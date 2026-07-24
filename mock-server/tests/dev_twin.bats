@@ -221,3 +221,191 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   "
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# dev_up state machine
+# ---------------------------------------------------------------------------
+@test "dev_up Running path: no limactl start, no installer, has curl" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_OUT_LIMACTL='floci-dev Running'
+    export STUB_OUT_CURL='200'
+    source '$DEV_SCRIPT'
+    assert_preconditions() { :; }
+    dev_up 2>&1
+  "
+  [ "$status" -eq 0 ]
+  ! grep -q 'limactl start' "$STUB_LOG"
+  ! grep -q 'setup-floci.sh' "$STUB_LOG"
+  grep -q 'curl' "$STUB_LOG"
+}
+
+@test "dev_up Stopped path: has limactl start, no installer" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_OUT_LIMACTL='floci-dev Running'
+    export STUB_OUT_CURL='200'
+    export DEV_START_BUDGET_RESUME=1
+    export DEV_HEALTH_TRIES=1
+    source '$DEV_SCRIPT'
+    assert_preconditions() { :; }
+    dev_instance_state() { printf 'Stopped\\n'; }
+    verify_disk_mount() { return 0; }
+    dev_up 2>&1
+  "
+  [ "$status" -eq 0 ]
+  grep -q 'limactl start floci-dev' "$STUB_LOG"
+  ! grep -q 'setup-floci.sh' "$STUB_LOG"
+}
+
+@test "dev_up Absent path: disk create before limactl start" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_OUT_LIMACTL='floci-dev Running'
+    export STUB_OUT_CURL='200'
+    export DEV_START_BUDGET_FIRST=1
+    export DEV_HEALTH_TRIES=1
+    source '$DEV_SCRIPT'
+    assert_preconditions() { :; }
+    dev_instance_state() { printf 'absent\\n'; }
+    dev_disk_exists() { return 1; }
+    limactl() {
+      printf 'limactl %s\\n' "\$*" >> "\$STUB_LOG"
+      [[ "\$*" == list* ]] && printf 'floci-dev Running\\n'
+      [[ "\$*" == *stat* ]] && printf '1777\\n'
+      return 0
+    }
+    verify_disk_mount() { return 0; }
+    _install_exec_condition() { :; }
+    dev_up 2>&1
+  "
+  [ "$status" -eq 0 ]
+  local create_line start_line
+  create_line=$(grep -n 'limactl disk create' "$STUB_LOG" | head -1 | cut -d: -f1)
+  start_line=$(grep -n 'limactl start' "$STUB_LOG" | head -1 | cut -d: -f1)
+  (( create_line < start_line ))
+  grep -q 'setup-floci.sh' "$STUB_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# dev_down
+# ---------------------------------------------------------------------------
+@test "dev_down on already Stopped prints stopped message" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    dev_instance_state() { printf 'Stopped\\n'; }
+    dev_down 2>&1
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already stopped"* ]] || [[ "$output" == *"Already"* ]] || [[ "$output" == *"stopped"* ]]
+}
+
+@test "dev_down on absent instance exits 0" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    dev_down 2>&1
+  "
+  [ "$status" -eq 0 ]
+}
+
+@test "dev_down on Installing state exits 1" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    dev_instance_state() { printf 'Installing\\n'; }
+    dev_down 2>&1
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR"* ]] || [[ "$output" == *"state"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# dev_status
+# ---------------------------------------------------------------------------
+@test "dev_status always exits 0" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_RC_LIMACTL=2
+    source '$DEV_SCRIPT'
+    dev_status 2>&1
+  "
+  [ "$status" -eq 0 ]
+}
+
+@test "dev_status does not call limactl start" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    dev_status 2>&1
+  "
+  [ "$status" -eq 0 ]
+  ! grep -q 'limactl start' "$STUB_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# dev_reset
+# ---------------------------------------------------------------------------
+@test "dev_reset without confirmation exits 1" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export DEV_CONFIRM_STDIN_TTY=0
+    source '$DEV_SCRIPT'
+    dev_reset 2>&1
+  "
+  [ "$status" -ne 0 ]
+  ! grep -q 'limactl delete' "$STUB_LOG"
+  ! grep -q 'disk delete' "$STUB_LOG"
+}
+
+@test "dev_reset with CONFIRM=reset calls limactl delete" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export CONFIRM=reset
+    export STUB_OUT_LIMACTL='floci-dev Running'
+    source '$DEV_SCRIPT'
+    dev_reset 2>&1 || true
+  "
+  grep -q 'limactl' "$STUB_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# dev_shell
+# ---------------------------------------------------------------------------
+@test "dev_shell on absent exits 1" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_OUT_LIMACTL=''
+    source '$DEV_SCRIPT'
+    assert_preconditions() { :; }
+    dev_shell 2>&1
+  "
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# dev_env
+# ---------------------------------------------------------------------------
+@test "dev_env --export prints export lines" {
+  run bash -c "
+    export HOME='${TEST_TMP}'
+    source '$DEV_SCRIPT'
+    dev_env --export
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AWS_PROFILE=floci-dev"* ]]
+  [[ "$output" == *"AWS_ENDPOINT_URL"* ]]
+}
+
+@test "dev_env creates aws config profile idempotently" {
+  run bash -c "
+    export HOME='${TEST_TMP}'
+    source '$DEV_SCRIPT'
+    dev_env --export >/dev/null
+    dev_env --export >/dev/null
+    grep -c '\\[profile floci-dev\\]' '${TEST_TMP}/.aws/config' | tail -1
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}

@@ -1,0 +1,14 @@
+Task 5: persistent local development twin lifecycle
+
+Implementation:
+- Added lifecycle Bats coverage for up state transitions, down, status, reset,
+  shell, and env profile idempotency.
+- Added wait-running and health polling helpers.
+- Added up/down/status/shell/recreate/reset/env functions and main dispatch.
+- Preserved the data disk across stop, recreate, and failure paths; reset is the
+  only disk-destructive command and requires confirmation.
+
+Verification:
+- bats mock-server/tests/dev_twin.bats: PASS (40 tests)
+- make check: PASS (110 installer tests, 83 mock-server tests)
+- bash -n mock-server/dev-twin.sh: PASS

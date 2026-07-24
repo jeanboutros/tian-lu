@@ -217,12 +217,315 @@ confirm_reset() {
   return 1
 }
 
+_wait_running() {
+  local budget="$1" deadline s
+  deadline=$((SECONDS + budget))
+  while (( SECONDS < deadline )); do
+    s="$(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null | awk -v n="$DEV_TWIN_NAME" '$1==n{print $2}')"
+    if [[ "$s" == "Running" ]]; then
+      return 0
+    fi
+    sleep "$DEV_POLL_INTERVAL"
+  done
+  printf 'ERROR: timeout: instance did not reach Running state\n' >&2
+  return 1
+}
+
+_health_check() {
+  local i code
+  for ((i = 0; i < DEV_HEALTH_TRIES; i++)); do
+    code="$(curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo "000")"
+    if [[ "$code" == "200" ]]; then
+      return 0
+    fi
+    sleep "$DEV_HEALTH_SLEEP"
+  done
+  printf 'ERROR: health: Floci did not return HTTP 200\n' >&2
+  return 1
+}
+
+assert_preconditions() {
+  local arch version major
+  arch="$(uname -m)"
+  if [[ "$arch" != "arm64" && "$arch" != "aarch64" ]]; then
+    printf 'ERROR: preconditions: dev twin requires an arm64 host\n' >&2
+    return 1
+  fi
+  if ! version="$(limactl --version 2>/dev/null)"; then
+    printf 'ERROR: preconditions: limactl is unavailable\n' >&2
+    return 1
+  fi
+  major="$(printf '%s\n' "$version" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+  if [[ -z "$major" || "$major" -lt 2 ]]; then
+    printf 'ERROR: preconditions: Lima 2.x is required\n' >&2
+    return 1
+  fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf 'ERROR: preconditions: lsof is required\n' >&2
+    return 1
+  fi
+  if ! limactl info 2>/dev/null | grep -qi qemu && ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    printf 'ERROR: preconditions: Lima QEMU support is required\n' >&2
+    return 1
+  fi
+}
+
+_install_exec_condition() {
+  local uid
+  uid="$(limactl shell "$DEV_TWIN_NAME" -- id -u floci 2>/dev/null)"
+  limactl shell "$DEV_TWIN_NAME" -- sudo -u floci env \
+    HOME=/home/floci \
+    "XDG_RUNTIME_DIR=/run/user/${uid}" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" \
+    bash -c 'mkdir -p ~/.config/systemd/user/floci.service.d && printf "[Service]\nExecCondition=/bin/bash -c '\''findmnt -no FSTYPE,SOURCE /mnt/lima-floci-dev-data 2>/dev/null | grep -qE \"^ext4 /dev/vd[a-z]+$\"'\''\n" > ~/.config/systemd/user/floci.service.d/mount-condition.conf && systemctl --user daemon-reload'
+}
+
+_start_service() {
+  local uid
+  uid="$(limactl shell "$DEV_TWIN_NAME" -- id -u floci 2>/dev/null)"
+  limactl shell "$DEV_TWIN_NAME" -- sudo -u floci env \
+    HOME=/home/floci \
+    "XDG_RUNTIME_DIR=/run/user/${uid}" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" \
+    systemctl --user start floci.service
+}
+
+_guest_ufw_baseline() {
+  limactl shell "$DEV_TWIN_NAME" -- sudo ufw allow OpenSSH
+  limactl shell "$DEV_TWIN_NAME" -- sudo ufw default deny incoming
+  limactl shell "$DEV_TWIN_NAME" -- sudo ufw default allow outgoing
+  limactl shell "$DEV_TWIN_NAME" -- sudo ufw --force enable
+}
+
+_install_absent() {
+  local skip_preflight="${1:-}" rc
+  if [[ "$skip_preflight" != "SKIP_PREFLIGHT" ]]; then
+    preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
+  fi
+  if dev_disk_exists; then
+    :
+  else
+    rc=$?
+    if [[ $rc -eq 1 ]]; then
+      limactl disk create "$DEV_DISK_NAME" --size "$DEV_DISK_SIZE"
+    else
+      return 1
+    fi
+  fi
+  limactl start --name="$DEV_TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" "$DEV_TEMPLATE"
+  _wait_running "$DEV_START_BUDGET_FIRST"
+  verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
+  limactl shell "$DEV_TWIN_NAME" -- sudo chmod 1777 /mnt/lima-floci-dev-data
+  if [[ "$(limactl shell "$DEV_TWIN_NAME" -- stat -c '%a' /mnt/lima-floci-dev-data 2>/dev/null)" != "1777" ]]; then
+    printf 'ERROR: disk-mount: mount root mode is not 1777\n' >&2
+    return 1
+  fi
+  _guest_ufw_baseline
+  limactl shell "$DEV_TWIN_NAME" -- sudo env FLOCI_HOST_PERSISTENT_PATH="$DEV_GUEST_DATA_ROOT" bash /opt/tianlu/setup-floci.sh
+  _install_exec_condition
+  managed_hosts_add
+  _health_check
+  dev_env
+}
+
+dev_up() {
+  assert_identity
+  assert_preconditions
+  local state
+  state="$(dev_instance_state)" || { printf 'ERROR: dev-up: failed to query instance state\n' >&2; return 1; }
+  case "$state" in
+    Running)
+      managed_hosts_add
+      _health_check
+      ;;
+    Stopped)
+      preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
+      limactl start "$DEV_TWIN_NAME"
+      _wait_running "$DEV_START_BUDGET_RESUME"
+      verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
+      _start_service
+      managed_hosts_add
+      _health_check
+      ;;
+    absent)
+      _install_absent
+      ;;
+    *)
+      printf 'ERROR: dev-up: instance is in state %s — run make dev-recreate or make dev-reset\n' "$state" >&2
+      return 1
+      ;;
+  esac
+}
+
+dev_down() {
+  assert_identity
+  local state next
+  state="$(dev_instance_state)" || { printf 'ERROR: dev-down: failed to query instance state\n' >&2; return 1; }
+  case "$state" in
+    Running)
+      limactl stop "$DEV_TWIN_NAME"
+      local deadline=$((SECONDS + DEV_STOP_BUDGET))
+      while (( SECONDS < deadline )); do
+        next="$(dev_instance_state 2>/dev/null || true)"
+        [[ "$next" != "Running" ]] && printf 'Instance stopped\n' && return 0
+        sleep "$DEV_POLL_INTERVAL"
+      done
+      printf 'instance did not stop within 30s\n' >&2
+      return 1
+      ;;
+    Stopped|absent)
+      printf 'Instance already stopped\n'
+      ;;
+    *)
+      printf 'ERROR: dev-down: instance is in state %s — run make dev-recreate or make dev-reset\n' "$state" >&2
+      return 1
+      ;;
+  esac
+}
+
+dev_status() {
+  assert_identity
+  local instance disk service code
+  if instance="$(dev_instance_state 2>/dev/null)"; then :; else instance=unavailable; fi
+  disk="$(dev_disk_state_safe)"
+  printf 'instance: %s\n' "$instance"
+  printf 'disk: %s\n' "$disk"
+  if [[ "$instance" == "Running" ]]; then
+    service="$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/$(id -u floci) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u floci)/bus systemctl --user is-active floci.service 2>/dev/null' 2>/dev/null | head -1 || true)"
+    [[ "$service" == "active" ]] || service=unavailable
+    code="$(curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo 000)"
+    [[ "$code" == "200" ]] && code=healthy || code=unavailable
+  else
+    service=unavailable
+    code=unavailable
+  fi
+  printf 'service: %s\nhealth: %s\n' "$service" "$code"
+}
+
+dev_shell() {
+  assert_identity
+  assert_preconditions
+  local state
+  state="$(dev_instance_state)" || { printf 'ERROR: dev-shell: failed to query instance state\n' >&2; return 1; }
+  case "$state" in
+    absent) printf 'dev instance not found — run make dev-up first\n' >&2; return 1 ;;
+    Stopped) printf 'dev instance is stopped — run make dev-up first\n' >&2; return 1 ;;
+    Running) exec limactl shell "$DEV_TWIN_NAME" ;;
+    *) printf 'ERROR: dev-shell: instance is in state %s\n' "$state" >&2; return 1 ;;
+  esac
+}
+
+dev_recreate() {
+  assert_identity
+  assert_preconditions
+  local state rc
+  state="$(dev_instance_state)" || { printf 'ERROR: dev-recreate: failed to query instance state\n' >&2; return 1; }
+  if [[ "$state" != "absent" ]]; then
+    limactl stop "$DEV_TWIN_NAME" 2>/dev/null || true
+    limactl delete -f "$DEV_TWIN_NAME" 2>/dev/null || true
+  fi
+  if dev_disk_exists; then
+    :
+  else
+    rc=$?
+    if [[ $rc -eq 1 ]]; then
+      printf 'ERROR: dev-recreate: data disk missing — run make dev-up for a fresh environment\n' >&2
+    fi
+    return 1
+  fi
+  preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
+  _install_absent SKIP_PREFLIGHT
+}
+
+_disk_instance() {
+  local out line instance
+  out="$(limactl disk list --json 2>/dev/null)" || { printf 'ERROR: disk-query: failed to query disk state\n' >&2; return 1; }
+  line="$(printf '%s\n' "$out" | grep -F '"name":"'"$DEV_DISK_NAME"'"' | head -1)"
+  [[ -n "$line" ]] || { printf 'ERROR: disk-query: disk name not found in JSON output\n' >&2; return 1; }
+  [[ "$line" == *'"instance"'* ]] || { printf 'ERROR: disk-query: instance field missing from JSON output — cannot safely determine attachment state\n' >&2; return 1; }
+  instance="$(printf '%s\n' "$line" | sed -n 's/.*"instance":"\([^"]*\)".*/\1/p')"
+  [[ -n "$instance" || "$line" == *'"instance":""'* ]] || {
+    printf 'ERROR: disk-query: instance field could not be parsed\n' >&2
+    return 1
+  }
+  printf '%s\n' "$instance"
+}
+
+dev_reset() {
+  assert_identity
+  confirm_reset
+  local state attachment post rc
+  state="$(dev_instance_state 2>/dev/null || true)"
+  if [[ -n "$state" && "$state" != "absent" ]]; then
+    limactl stop "$DEV_TWIN_NAME" 2>/dev/null || true
+    limactl delete -f "$DEV_TWIN_NAME" 2>/dev/null || true
+  fi
+  if dev_disk_exists; then
+    attachment="$(_disk_instance)" || return 1
+    if [[ -n "$attachment" && "$attachment" != "$DEV_TWIN_NAME" ]]; then
+      printf 'ERROR: disk-reset: disk attached to another instance — refusing to force-delete\n' >&2
+      return 1
+    fi
+    if [[ "$attachment" == "$DEV_TWIN_NAME" ]]; then
+      limactl disk unlock "$DEV_DISK_NAME"
+      attachment="$(_disk_instance)" || return 1
+      if [[ -n "$attachment" ]]; then
+        printf 'ERROR: disk-reset: disk still locked — refusing to force-delete\n' >&2
+        return 1
+      fi
+    fi
+    limactl disk delete "$DEV_DISK_NAME"
+    if ! post="$(limactl disk list --json 2>/dev/null)"; then
+      printf 'ERROR: disk-delete: post-delete verification query failed\n' >&2
+      return 1
+    fi
+    if printf '%s' "$post" | grep -qF '"name":"'"$DEV_DISK_NAME"'"'; then
+      printf 'ERROR: disk-delete: disk still present after deletion\n' >&2
+      return 1
+    fi
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] || return 1
+  fi
+  managed_hosts_remove
+  printf 'Environment reset complete.\n'
+}
+
+dev_env() {
+  assert_identity
+  local export_only=false aws_dir config_file creds_file
+  [[ "${1:-}" == "--export" ]] && export_only=true
+  aws_dir="${HOME}/.aws"
+  config_file="${aws_dir}/config"
+  creds_file="${aws_dir}/credentials"
+  mkdir -p "$aws_dir"
+  if ! grep -q '\[profile floci-dev\]' "$config_file" 2>/dev/null; then
+    printf '\n[profile floci-dev]\nregion = eu-west-1\noutput = json\nca_bundle =\n' >> "$config_file"
+  fi
+  if ! grep -q '\[floci-dev\]' "$creds_file" 2>/dev/null; then
+    printf '\n[floci-dev]\naws_access_key_id = test\naws_secret_access_key = test\n' >> "$creds_file"
+  fi
+  if "$export_only"; then
+    printf 'export AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n'
+  else
+    printf '\n# AWS CLI configured for floci-dev twin:\n# Profile "floci-dev" added to ~/.aws/config and ~/.aws/credentials\n#\n# To connect in this shell:\nexport AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n#\n# Or: eval "$(make dev-env -- --export)"\n'
+  fi
+}
+
 main() {
   if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     unset DEV_HOSTS_FILE
     assert_identity
     local cmd="${1:-}"
+    shift || true
     case "$cmd" in
+      up) dev_up "$@" ;;
+      down) dev_down "$@" ;;
+      status) dev_status "$@" ;;
+      shell) dev_shell "$@" ;;
+      recreate) dev_recreate "$@" ;;
+      reset) dev_reset "$@" ;;
+      env) dev_env "$@" ;;
       '') printf 'Usage: dev-twin.sh <up|down|status|shell|recreate|reset|env>\n' >&2; return 1 ;;
       *) printf 'ERROR: unknown subcommand: %s\n' "$cmd" >&2; return 1 ;;
     esac
