@@ -8,6 +8,8 @@ setup() {
   setup_stub_env
   # Export variables that setup-floci.sh CONFIG block reads as overrides.
   export FLOCI_HOME
+  export FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOME}/floci-data"
+  export FLOCI_DATA_DIR="${FLOCI_HOME}/floci-data"
   export QUADLET_UNIT_DIR="${FLOCI_HOME}/.config/containers/systemd"
   export FLOCI_QUADLET_FILE="${QUADLET_UNIT_DIR}/floci.container"
 
@@ -105,6 +107,8 @@ EOF
 # ---------------------------------------------------------------------------
 _source_and_run() {
   bash -c "export FLOCI_HOME='${FLOCI_HOME}'; \
+           export FLOCI_HOST_PERSISTENT_PATH='${FLOCI_HOST_PERSISTENT_PATH}'; \
+           export FLOCI_DATA_DIR='${FLOCI_DATA_DIR}'; \
            export QUADLET_UNIT_DIR='${QUADLET_UNIT_DIR}'; \
            export FLOCI_QUADLET_FILE='${FLOCI_QUADLET_FILE}'; \
            export STUB_LOG='${STUB_LOG}'; \
@@ -173,7 +177,22 @@ _source_and_run() {
 @test "write_quadlet_unit file contains data Volume ending in :z" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "Volume=%h/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+  grep -q "Volume=${FLOCI_HOME}/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit: uses configurable host persistence path" {
+  export FLOCI_HOST_PERSISTENT_PATH=/tmp/custom-data
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "Volume=/tmp/custom-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit: host path override wins over FLOCI_DATA_DIR" {
+  export FLOCI_HOST_PERSISTENT_PATH=/tmp/canonical
+  export FLOCI_DATA_DIR=/tmp/other
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "Volume=/tmp/canonical:/app/data:z" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file contains UserNS keep-id mapping for the Floci image user" {
