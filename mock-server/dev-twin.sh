@@ -7,7 +7,8 @@ readonly DEV_TWIN_NAME="${DEV_TWIN_NAME:-floci-dev}"
 readonly DEV_DISK_NAME="${DEV_DISK_NAME:-floci-dev-data}"
 readonly DEV_DISK_SIZE="${DEV_DISK_SIZE:-30GiB}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT
 readonly DEV_TEMPLATE="${SCRIPT_DIR}/lima/floci-dev.yaml"
 readonly DEV_GUEST_DATA_ROOT="/mnt/lima-floci-dev-data/floci-data"
 readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
@@ -391,6 +392,8 @@ dev_status() {
   printf 'instance: %s\n' "$instance"
   printf 'disk: %s\n' "$disk"
   if [[ "$instance" == "Running" ]]; then
+    # SC2016: single quotes are intentional — $(id -u floci) must expand inside the guest, not on the host
+    # shellcheck disable=SC2016
     service="$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/$(id -u floci) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u floci)/bus systemctl --user is-active floci.service 2>/dev/null' 2>/dev/null | head -1 || true)"
     [[ "$service" == "active" ]] || service=unavailable
     code="$(curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo 000)"
@@ -508,6 +511,7 @@ dev_env() {
   if "$export_only"; then
     printf 'export AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n'
   else
+    # shellcheck disable=SC2016
     printf '\n# AWS CLI configured for floci-dev twin:\n# Profile "floci-dev" added to ~/.aws/config and ~/.aws/credentials\n#\n# To connect in this shell:\nexport AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n#\n# Or: eval "$(make dev-env -- --export)"\n'
   fi
 }
