@@ -3,6 +3,7 @@
 **Date:** <YYYY-MM-DD>
 **Status:** Accepted
 **Context source:** ../sessions/<YYYY-MM-DD-slug>.md
+**Related finding:** ../findings/<NNNN-slug>.md (or "none")
 
 ## Context
 <the problem, the constraints, what "good" looks like for the platform in Floci>

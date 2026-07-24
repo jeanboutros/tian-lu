@@ -4,6 +4,7 @@
 **Question:** <original question as invoked>
 **Outcome:** <accepted | deeper | stopped>
 **Decision record:** <../decisions/NNNN-slug.md or "none">
+**Related finding:** ../findings/<NNNN-slug>.md (or "none")
 
 ## Challenge
 <sharpened problem statement, surfaced assumptions, clarifying questions + your answers>

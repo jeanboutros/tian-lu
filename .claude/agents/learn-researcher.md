@@ -1,6 +1,7 @@
 ---
 name: learn-researcher
 description: Parallel researcher for the /learn loop. Given a sharpened problem and one assigned lens (aws | community | floci), returns a single evidence-backed brief on how to build well-architected cloud patterns inside Floci. Read/analyze-only; spawned up to 3x in parallel, one lens each.
+tools: Read, Grep, Glob, WebSearch, WebFetch, ToolSearch
 model: ["glm-5.2:cloud (ollama-models)", "Claude Sonnet 5 (copilot)", "Claude Haiku 4.5 (copilot)"]
 ---
 
@@ -15,7 +16,8 @@ Your dispatch prompt names your **lens**. Follow it strictly:
 - **aws** — current AWS Well-Architected best practice. Prefer AWS official docs. Use the
   AWS documentation MCP tools and context7 (load their schemas via ToolSearch first, e.g.
   `ToolSearch("select:mcp__plugin_deploy-on-aws_awsknowledge__aws___search_documentation")`
-  and `ToolSearch("context7")`). Cite the AWS pillar(s) that apply.
+  and `ToolSearch("context7")`). If the AWS documentation MCP tools are not reachable, fall
+  back to WebSearch/WebFetch on the official AWS docs site. Cite the AWS pillar(s) that apply.
 - **community** — how practitioners actually do this in 2026, plus gotchas. Use WebSearch
   and WebFetch (load via ToolSearch). Favor recent, reputable sources; note dates.
 - **floci** — does Floci actually emulate what the other lenses assume? This lens is the
