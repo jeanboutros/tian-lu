@@ -7,7 +7,7 @@ Floci embeds `FLOCI_HOSTNAME` (`tianlu-floci`) into every URL it generates — S
 On the server itself, `/etc/hosts` or the Podman network DNS handles this. But for **LAN clients** — developer laptops, CI runners, other machines on the network — there is no built-in resolution. Without dnsmasq, every LAN client needs a manual `/etc/hosts` entry:
 
 ```
-192.168.x.x  tianlu-floci
+10.0.x.x  tianlu-floci
 ```
 
 This does not scale. Every new client needs the entry, and if the server IP changes, every entry must be updated.
@@ -33,8 +33,8 @@ dnsmasq provides:
 ┌──────────────┐        DNS query: "tianlu-floci?"         ┌──────────────┐
 │  LAN client  │ ─────────────────────────────────────────▶│  dnsmasq on  │
 │  (laptop)    │                                             │  Floci host  │
-│              │◀───────────────────────────────────────── │  192.168.x.x │
-│              │        Response: "192.168.x.x"             └──────────────┘
+│              │◀───────────────────────────────────────── │  10.0.x.x │
+│              │        Response: "10.0.x.x"             └──────────────┘
 └──────────────┘                                                  │
                                                                   │ upstream
                                                                   ▼
@@ -46,7 +46,7 @@ dnsmasq provides:
 
 1. A LAN client queries `tianlu-floci`.
 2. The query reaches dnsmasq (either because the client uses the Floci host as its DNS server, or because the router forwards `.floci` queries to it).
-3. dnsmasq matches the `address=/tianlu-floci/192.168.x.x` rule and responds with the server's LAN IP.
+3. dnsmasq matches the `address=/tianlu-floci/10.0.x.x` rule and responds with the server's LAN IP.
 4. For any other query (e.g. `google.com`), dnsmasq forwards to the upstream resolver (router or ISP DNS) and caches the response.
 
 ## 5. Configuration
@@ -57,13 +57,13 @@ A minimal `/etc/dnsmasq.d/floci` configuration:
 
 ```ini
 # Map tianlu-floci to the server's LAN IP
-address=/tianlu-floci/192.168.x.x
+address=/tianlu-floci/10.0.x.x
 
 # Optional: wildcard for future *.tianlu-floci subdomains
-# address=/.tianlu-floci/192.168.x.x
+# address=/.tianlu-floci/10.0.x.x
 
 # Upstream DNS (auto-detect from /etc/resolv.conf or resolvectl)
-server=192.168.1.1
+server=10.0.0.1
 
 # Only listen on the LAN interface (auto-detect via ip route)
 interface=enp3s0
