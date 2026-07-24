@@ -277,15 +277,14 @@ _install_exec_condition() {
   tmpfile="$(mktemp /tmp/exec-condition.XXXXXX)"
   printf '[Service]\nExecCondition=/bin/bash -c '"'"'findmnt -no FSTYPE,SOURCE /mnt/lima-floci-dev-data 2>/dev/null | grep -qE "^ext4 /dev/vd[a-z][0-9]+$"'"'"'\n' > "$tmpfile"
   limactl copy "$tmpfile" "$DEV_TWIN_NAME:/tmp/mount-condition.conf" 2>/dev/null
-  # shellcheck disable=SC2016
-  limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus bash -c 'mkdir -p ~/.config/systemd/user/floci.service.d && cp /tmp/mount-condition.conf ~/.config/systemd/user/floci.service.d/mount-condition.conf && systemctl --user daemon-reload'" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo -u floci bash -c "XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus mkdir -p /home/floci/.config/systemd/user/floci.service.d && cp /tmp/mount-condition.conf /home/floci/.config/systemd/user/floci.service.d/mount-condition.conf && XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload" 2>/dev/null
   rm -f "$tmpfile"
 }
 
 _start_service() {
   local uid
   uid="$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'id -u floci 2>/dev/null' 2>/dev/null)"
-  limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user start floci.service" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo -u floci bash -c "XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user start floci.service" 2>/dev/null
 }
 
 _guest_ufw_baseline() {
@@ -319,7 +318,7 @@ _install_absent() {
     return 1
   fi
   _guest_ufw_baseline
-  limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo env FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT bash /opt/tianlu/setup-floci.sh" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT bash /opt/tianlu/setup-floci.sh" 2>/dev/null
   _install_exec_condition
   managed_hosts_add
   _health_check
