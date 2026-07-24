@@ -1,0 +1,79 @@
+# Persistent local development environment for Floci.
+# This Lima VM keeps its standalone data disk and forwards user-facing
+# sidecar ports to localhost for local development workflows.
+
+minimumLimaVersion: 2.0.0
+
+vmType: qemu
+arch: aarch64
+
+cpus: 4
+memory: 8GiB
+disk: 30GiB
+
+mountType: 9p
+
+base:
+- template:_images/ubuntu-26.04
+
+mounts:
+- location: "/Users/placeholder/tianlu"
+  mountPoint: /opt/tianlu
+  writable: false
+
+additionalDisks:
+- name: floci-dev-data
+  format: true
+  fsType: ext4
+
+portForwards:
+- guestPort: 4566
+  hostPort: 4566
+  hostIP: "127.0.0.1"
+- guestPortRange: [6379, 6399]
+  hostPortRange: [6379, 6399]
+  hostIP: "127.0.0.1"
+- guestPortRange: [7001, 7099]
+  hostPortRange: [7001, 7099]
+  hostIP: "127.0.0.1"
+- guestPortRange: [5100, 5199]
+  hostPortRange: [5100, 5199]
+  hostIP: "127.0.0.1"
+- guestPortRange: [6500, 6599]
+  hostPortRange: [6500, 6599]
+  hostIP: "127.0.0.1"
+- guestPortRange: [9400, 9499]
+  hostPortRange: [9400, 9499]
+  hostIP: "127.0.0.1"
+- guestPortRange: [2200, 2299]
+  hostPortRange: [2200, 2299]
+  hostIP: "127.0.0.1"
+- guestPort: 9169
+  hostPort: 9169
+  hostIP: "127.0.0.1"
+
+user:
+  passwordlessSudo: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates apparmor apparmor-utils ufw nftables
+    rm -rf /var/lib/apt/lists/*
+
+probes:
+- mode: readiness
+  description: systemd user manager reachable
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    timeout 60s bash -c 'until systemctl is-system-running >/dev/null 2>&1 || systemctl is-active default.target >/dev/null 2>&1; do sleep 2; done'
+
+containerd:
+  system: false
+  user: false
