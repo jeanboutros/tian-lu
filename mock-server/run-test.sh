@@ -423,6 +423,20 @@ run_reboot_test() {
 }
 
 # validate_summary
+# seen_get <name>
+# Look up a criterion in the seen_names/seen_vals parallel arrays.
+# Prints the value or "MISSING". bash 3.2-compatible (no declare -A).
+seen_get() {
+  local needle="$1" i
+  for ((i = 0; i < ${#seen_names[@]}; i++)); do
+    if [[ "${seen_names[$i]}" == "$needle" ]]; then
+      printf '%s' "${seen_vals[$i]}"
+      return 0
+    fi
+  done
+  printf 'MISSING'
+}
+
 # Parse the sealed summary.md and enforce the criterion status matrix.
 # reboot-health-200 may always be PENDING (documented twin limit).
 # reboot-ordering must be PASS when --reboot-test was passed.
@@ -438,21 +452,26 @@ validate_summary() {
                    run2-exit-0 idempotency-hosts idempotency-subuid idempotency-hashes)
 
   # Parse table rows: | criterion | status |
-  declare -A seen
+  # bash 3.2 (macOS /bin/bash) has no associative arrays; use parallel indexed
+  # arrays + seen_get() helper. Same semantics as declare -A.
+  local seen_names=() seen_vals=() _existing criterion status
   while IFS='|' read -r _ criterion status _; do
     criterion="$(printf '%s' "$criterion" | tr -d ' ')"
     status="$(printf '%s' "$status" | tr -d ' ')"
     [[ -z "$criterion" || "$criterion" == Criterion || "$criterion" == --- ]] && continue
-    if [[ -n "${seen[$criterion]+x}" ]]; then
+    _existing="$(seen_get "$criterion")"
+    if [[ "$_existing" != "MISSING" ]]; then
       FAIL_REASON="validate_summary: duplicate criterion row: $criterion"
       return 1
     fi
-    seen["$criterion"]="$status"
+    seen_names+=("$criterion")
+    seen_vals+=("$status")
   done < "$summary_file"
 
   # Check mandatory non-reboot criteria
+  local c val
   for c in "${mandatory[@]}"; do
-    local val="${seen[$c]:-MISSING}"
+    val="$(seen_get "$c")"
     if [[ "$c" == "sidecar-delta" && "$NO_SIDECAR" == true ]]; then
       [[ "$val" == "SKIPPED" || "$val" == "PASS" ]] && continue
     fi
@@ -463,8 +482,11 @@ validate_summary() {
   done
 
   # Reboot criteria
-  local reboot_health="${seen[reboot-health-200]:-PENDING}"
-  local reboot_ordering="${seen[reboot-ordering]:-PENDING}"
+  local reboot_health reboot_ordering
+  reboot_health="$(seen_get reboot-health-200)"
+  [[ "$reboot_health" == "MISSING" ]] && reboot_health="PENDING"
+  reboot_ordering="$(seen_get reboot-ordering)"
+  [[ "$reboot_ordering" == "MISSING" ]] && reboot_ordering="PENDING"
   # reboot-health-200 may always be PENDING (documented Lima twin limit)
   if [[ "$reboot_health" == "FAIL" ]]; then
     FAIL_REASON="validate_summary: reboot-health-200 is FAIL"
