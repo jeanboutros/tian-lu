@@ -19,9 +19,9 @@ TEMPLATE="${BATS_TEST_DIRNAME}/../../mock-server/lima/floci-dev.yaml"
   grep -q 'fsType: ext4' "$TEMPLATE"
 }
 
-@test "template has exactly 8 hostIP 127.0.0.1 entries" {
+@test "template has exactly 9 hostIP 127.0.0.1 entries" {
   count=$(grep -c 'hostIP: "127.0.0.1"' "$TEMPLATE")
-  [ "$count" -eq 8 ]
+  [ "$count" -eq 9 ]
 }
 
 @test "template has guestPort 4566" {

@@ -402,6 +402,35 @@ the harness stays maintainable.
   manifest confirms no `podman`/`uidmap`/`passt`/`containers-common` in the
   base image. An earlier misdiagnosis (polluted instance from a manual
   debug run) suggested otherwise; the manifest is authoritative.
+- **Dev twin disables TLS; production keeps it.** The dev twin passes
+  `FLOCI_TLS_ENABLED=false FLOCI_TLS_SELF_SIGNED=false` to `setup-floci.sh`
+  (dev-twin.sh line 322) so Floci serves plain HTTP on 4566. This matches the
+  working native-podman setup (`_tmp/setup.sh`) and avoids the Floci UI
+  sidecar's Node backend rejecting the self-signed cert that TLS-on produces.
+  The production installer and the test twin keep TLS on (they validate the
+  production config). With TLS off, Floci's built-in UI launcher
+  (`GET /_floci/ui`, PR #1313) injects `http://tianlu-floci:4566` into the
+  sidecar — no cert rejection, no reverting.
+- **Floci UI is launched by Floci itself — do NOT run `floci-ui` manually.**
+  As of PR #1313, `GET /` (with `Accept: text/html`) serves a landing page;
+  `GET /_floci/ui` lazily spawns the `floci/floci-ui` sidecar with
+  `FLOCI_ENDPOINT` injected automatically. A manually-launched `floci-ui`
+  container reverts to the image default (`https://tianlu-floci:4566`) on
+  every restart (no Quadlet, no restart policy) and blocks Floci's launcher
+  (which adopts an existing container rather than spawning a correct one).
+  To use the UI: open `http://localhost:4566/` in the browser → click
+  "Open Floci UI" → redirected to the sidecar URL.
+- **The sidecar's browser-facing port needs forwarding in the Lima VM.**
+  In native podman (e.g. `_tmp/setup.sh`, `podman machine`), Floci's
+  launcher publishes the sidecar with `-p <port>:<port>` directly on the
+  Mac's localhost — no forwarding needed. In the Lima dev twin, Floci runs
+  inside a container inside the VM, so the sidecar's published port is bound
+  on the VM's localhost, not the Mac's. The Lima template (`floci-dev.yaml`)
+  must forward the browser-facing port so the Mac's browser can reach it. The
+  port is probe-identified: after `make dev-recreate`, trigger
+  `GET /_floci/ui/status` and read the `url` field, or inspect `podman ps`
+  inside the VM. (PR #1471 documents the native-vs-container endpoint
+  resolution split.)
 
 ---
 

@@ -14,7 +14,7 @@ readonly DEV_GUEST_DATA_ROOT="/mnt/lima-floci-dev-data/floci-data"
 readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_MARKER_END="# END tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_ENTRY="127.0.0.1 tianlu-floci"
-readonly DEV_HEALTH_URL="https://tianlu-floci:4566/_floci/init"
+readonly DEV_HEALTH_URL="http://tianlu-floci:4566/_floci/init"
 readonly DEV_HEALTH_TRIES=30
 readonly DEV_HEALTH_SLEEP=2
 readonly DEV_START_BUDGET_FIRST=600
@@ -319,7 +319,7 @@ _install_absent() {
     return 1
   fi
   _guest_ufw_baseline
-  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "cd / && FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT bash /opt/tianlu/setup-floci.sh" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "cd / && FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT FLOCI_TLS_ENABLED=false FLOCI_TLS_SELF_SIGNED=false bash /opt/tianlu/setup-floci.sh" 2>/dev/null
   _install_exec_condition
   managed_hosts_add
   _health_check

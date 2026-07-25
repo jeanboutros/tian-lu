@@ -30,6 +30,10 @@ portForwards:
 - guestPort: 4566
   hostPort: 4566
   hostIP: "127.0.0.1"
+# floci-ui sidecar (launched on demand by Floci's /_floci/ui; port confirmed by probe)
+- guestPort: 4500
+  hostPort: 4500
+  hostIP: "127.0.0.1"
 - guestPortRange: [6379, 6399]
   hostPortRange: [6379, 6399]
   hostIP: "127.0.0.1"
