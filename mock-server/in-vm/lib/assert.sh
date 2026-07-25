@@ -147,6 +147,32 @@ write_sentinel() {
   mv -f "${path}.tmp" "$path"
 }
 
+# assert_pinned_user
+# Assert the VM is running as the pinned non-root user (floci-runner, uid 1001)
+# and that no host-derived user exists in the non-system uid range 1000-65533.
+# Standalone so it can be unit-tested without pulling in all of step_preflight.
+assert_pinned_user() {
+  local expected_user="floci-runner"
+  local actual_user
+  actual_user="$(whoami)"
+  if [[ "$actual_user" != "$expected_user" ]]; then
+    FAIL_REASON="pinned-user: whoami=${actual_user} expected ${expected_user}"
+    return 1
+  fi
+
+  local non_system_users
+  non_system_users="$(getent passwd | awk -F: '$3>=1000 && $3<65534 {print $1}')"
+  local user_count
+  user_count="$(printf '%s\n' "$non_system_users" | grep -c .)" 2>/dev/null || user_count=0
+  if [[ "$user_count" -ne 1 || "$non_system_users" != "$expected_user" ]]; then
+    FAIL_REASON="pinned-user: non-system users in uid 1000-65533: [${non_system_users}] expected only [${expected_user}]"
+    return 1
+  fi
+
+  log "preflight: user=${expected_user}(uid $(id -u)) ok"
+  return 0
+}
+
 # run_as_floci_guest <cmd> [args...]
 # Drop privileges to the floci user with the same env contract as setup-floci.sh.
 # No trailing `--` before "$@": GNU coreutils 9.4 `env` treats

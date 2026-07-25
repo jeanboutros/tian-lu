@@ -96,6 +96,8 @@ select_unprivileged_user() {
 step_preflight() {
   local aa probe_user podman_command=podman
 
+  assert_pinned_user || { FAIL_REASON="${FAIL_REASON:-pinned-user check failed}"; return 1; }
+
   systemctl is-system-running >/dev/null 2>&1 || systemctl is-active default.target >/dev/null 2>&1 || {
     FAIL_REASON="preflight: systemd not running"
     return 1
@@ -347,6 +349,7 @@ main() {
   step_semantic_convergence
   step_evidence
   log "DRIVER COMPLETE"
+  write_sentinel "$EVIDENCE_STAGING/DONE"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
