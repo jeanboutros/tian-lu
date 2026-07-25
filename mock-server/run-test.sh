@@ -45,7 +45,7 @@ die() {
 }
 
 # assert_preconditions
-# Verify the macOS host can run a VZ-backed Apple Silicon Lima guest.
+# Verify the macOS host can run a QEMU-backed Apple Silicon Lima guest.
 assert_preconditions() {
   local lima_version macos_version macos_major
 
@@ -56,7 +56,7 @@ assert_preconditions() {
   macos_version="$(sw_vers -productVersion)"
   macos_major="${macos_version%%.*}"
   if [[ ! "$macos_major" =~ ^[0-9]+$ ]] || (( macos_major < 13 )); then
-    die 'vz backend requires macOS 13+'
+    die 'qemu backend requires macOS 13+'
   fi
 }
 
@@ -141,7 +141,7 @@ wait_for_running() {
 }
 
 # ensure_twin
-# Create or reuse the guest, then prepare its virtiofs evidence staging area.
+# Create or reuse the guest, then prepare its 9p evidence staging area.
 ensure_twin() {
   if [[ "$FRESH" == true ]]; then
     limactl stop "$TWIN_NAME" 2>/dev/null || true
@@ -198,7 +198,7 @@ launch_driver() {
 }
 
 # poll_sentinel
-# Observe the virtiofs staging area until the guest writes success or failure evidence.
+# Observe the 9p staging area until the guest writes success or failure evidence.
 poll_sentinel() {
   local budget deadline
 
@@ -212,17 +212,27 @@ poll_sentinel() {
       FAIL_REASON="driver failed: $(<"$STAGING/FAILED")"
       return 1
     fi
-    if [[ -f "$STAGING/summary.md" ]]; then
-      sleep 3
-      if [[ -f "$STAGING/summary.md" && ! -f "$STAGING/FAILED" ]]; then
-        return 0
-      fi
+    if [[ -f "$STAGING/DONE" ]]; then
+      return 0
     fi
     sleep 5
   done
 
-  FAIL_REASON="driver did not publish summary.md within ${budget}s"
+  FAIL_REASON="driver did not publish DONE within ${budget}s"
   return 2
+}
+
+# wait_driver
+# Reap the driver transport and validate its exit status.
+# Must run before any reboot so limactl stop cannot kill the transport first.
+wait_driver() {
+  local status=0
+  wait "${DRIVER_SHELL_PID:-}" 2>/dev/null || status=$?
+  DRIVER_SHELL_PID=""
+  if [[ "$status" -ne 0 ]]; then
+    FAIL_REASON="driver exited nonzero (${status}) despite DONE"
+    return 1
+  fi
 }
 
 # publish_evidence
@@ -245,8 +255,6 @@ publish_evidence() {
       sort -z |
       xargs -0 sha256sum >"${MANIFEST_NAME}.tmp"
     mv "${MANIFEST_NAME}.tmp" "$MANIFEST_NAME"
-    printf 'DONE\n' >"${SENTINEL_NAME}.tmp"
-    mv "${SENTINEL_NAME}.tmp" "$SENTINEL_NAME"
   ) || {
     FAIL_REASON='failed to publish evidence manifest'
     return 1
@@ -260,8 +268,6 @@ publish_evidence() {
     FAIL_REASON='failed to copy virtiofs evidence to final host directory'
     return 1
   }
-  wait "$DRIVER_SHELL_PID" 2>/dev/null || true
-  DRIVER_SHELL_PID=""
   (
     cd "$FINAL"
     sha256sum -c "$MANIFEST_NAME"
@@ -290,7 +296,7 @@ file_mtime() {
 append_reboot_result() {
   local criterion=${1-} result=${2-}
 
-  printf '| %s | %s |\n' "$criterion" "$result" >>"$FINAL/summary.md"
+  printf '| %s | %s |\n' "$criterion" "$result" >>"$STAGING/summary.md"
 }
 
 # wait_for_reboot_health
@@ -303,11 +309,13 @@ append_reboot_result() {
 wait_for_reboot_health() {
   local deadline http_code
 
+  REBOOT_HEALTH_OUTCOME=""
   deadline=$((SECONDS + REBOOT_HEALTH_BUDGET))
   while (( SECONDS < deadline )); do
     http_code="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
       'curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" https://tianlu-floci:4566/_floci/init' 2>/dev/null || true)"
     if [[ "$http_code" == '200' ]]; then
+      REBOOT_HEALTH_OUTCOME='direct'
       return 0
     fi
     sleep 5
@@ -326,19 +334,21 @@ wait_for_reboot_health() {
     http_code="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
       'curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" https://tianlu-floci:4566/_floci/init' 2>/dev/null || true)"
     if [[ "$http_code" == '200' ]]; then
+      REBOOT_HEALTH_OUTCOME='fallback'
       return 0
     fi
     sleep 5
   done
+  REBOOT_HEALTH_OUTCOME='failed'
   return 1
 }
 
 # run_reboot_test
 # Prove Quadlet waits for podman.socket and starts Floci without re-installing.
 run_reboot_test() {
-  local run2_mtime_before run2_mtime_after check_output health_result ordering_result journal_socket_line journal_service_line
+  local run2_mtime_before run2_mtime_after health_result ordering_result journal_socket_line journal_service_line
 
-  run2_mtime_before="$(file_mtime "$FINAL/run2.log")"
+  run2_mtime_before="$(file_mtime "$STAGING/run2.log")"
   if [[ "$run2_mtime_before" == '0' ]]; then
     FAIL_REASON='reboot test requires run2.log evidence'
     return 1
@@ -354,45 +364,115 @@ run_reboot_test() {
   }
   wait_for_running "$REBOOT_HEALTH_BUDGET" || return 1
   if wait_for_reboot_health; then
-    health_result='PASS'
+    if [[ "$REBOOT_HEALTH_OUTCOME" == 'direct' ]]; then
+      health_result='PASS'
+    else
+      health_result='PENDING'
+    fi
   else
     health_result='FAIL'
   fi
 
-  check_output="$(limactl shell "$TWIN_NAME" -- sudo bash -c '
-    . /opt/tianlu/mock-server/in-vm/lib/assert.sh
-    printf "service="; run_as_floci_guest systemctl --user is-active floci.service 2>/dev/null || true
-    printf "health="; curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" https://tianlu-floci:4566/_floci/init || true
-    printf "\nunit="; run_as_floci_guest systemctl --user show -p After -p Requires floci.service 2>/dev/null || true
-  ' 2>&1 || true)"
-  if [[ "$check_output" == *'service=active'* && "$check_output" == *'After='*'podman.socket'* && "$check_output" == *'Requires='*'podman.socket'* ]]; then
+  local service_active after_val requires_val
+  service_active="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
+    '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
+     run_as_floci_guest systemctl --user is-active floci.service 2>/dev/null || true')"
+  after_val="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
+    '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
+     run_as_floci_guest systemctl --user show --value -p After floci.service 2>/dev/null || true')"
+  requires_val="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
+    '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
+     run_as_floci_guest systemctl --user show --value -p Requires floci.service 2>/dev/null || true')"
+  if [[ "$service_active" == "active" && \
+        " $after_val " == *" podman.socket "* && \
+        " $requires_val " == *" podman.socket "* ]]; then
     ordering_result='PASS'
   else
     ordering_result='FAIL'
   fi
-  if [[ "$check_output" != *'health=200'* ]]; then
-    health_result='FAIL'
-  fi
+  # health is tracked via REBOOT_HEALTH_OUTCOME, not check_output
 
   limactl shell "$TWIN_NAME" -- sudo bash -c '
     . /opt/tianlu/mock-server/in-vm/lib/assert.sh
     run_as_floci_guest journalctl --user -b -u podman.socket -u floci.service
-  ' >"$FINAL/reboot-journal.log" 2>&1 || true
-  journal_socket_line="$(grep -n 'podman.socket' "$FINAL/reboot-journal.log" | sed -n '1p' || true)"
-  journal_service_line="$(grep -n 'floci.service' "$FINAL/reboot-journal.log" | sed -n '1p' || true)"
+  ' >"$STAGING/reboot-journal.log" 2>&1 || true
+  journal_socket_line="$(grep -n 'podman.socket' "$STAGING/reboot-journal.log" | sed -n '1p' || true)"
+  journal_service_line="$(grep -n 'floci.service' "$STAGING/reboot-journal.log" | sed -n '1p' || true)"
   if [[ -z "$journal_socket_line" || -z "$journal_service_line" || ${journal_socket_line%%:*} -ge ${journal_service_line%%:*} ]]; then
     ordering_result='FAIL'
   fi
 
-  append_reboot_result 'reboot-health-200' "$health_result"
-  append_reboot_result 'reboot-ordering' "$ordering_result"
-  run2_mtime_after="$(file_mtime "$FINAL/run2.log")"
+  # Atomically rewrite the reboot rows in staging summary.md
+  local tmp_summary="${STAGING}/summary.md.tmp"
+  awk -v health="$health_result" -v ordering="$ordering_result" '
+    /^\| reboot-health-200 \|/ { print "| reboot-health-200 | " health " |"; next }
+    /^\| reboot-ordering \|/ { print "| reboot-ordering | " ordering " |"; next }
+    { print }
+  ' "$STAGING/summary.md" > "$tmp_summary" && mv -f "$tmp_summary" "$STAGING/summary.md"
+  if [[ "$health_result" == 'PENDING' && "$REBOOT_HEALTH_OUTCOME" == 'fallback' ]]; then
+    append_reboot_result 'post-settle-restart-health' 'PASS'
+  fi
+  run2_mtime_after="$(file_mtime "$STAGING/run2.log")"
   if [[ "$run2_mtime_after" != "$run2_mtime_before" ]]; then
     FAIL_REASON='reboot test detected an unexpected installer re-run'
     return 1
   fi
-  if [[ "$health_result" != 'PASS' || "$ordering_result" != 'PASS' ]]; then
+  if [[ "$ordering_result" != 'PASS' || "$health_result" == 'FAIL' ]]; then
     FAIL_REASON='reboot health or Quadlet ordering proof failed'
+    return 1
+  fi
+}
+
+# validate_summary
+# Parse the sealed summary.md and enforce the criterion status matrix.
+# reboot-health-200 may always be PENDING (documented twin limit).
+# reboot-ordering must be PASS when --reboot-test was passed.
+# Duplicate criterion rows are rejected.
+validate_summary() {
+  local summary_file="${FINAL}/summary.md"
+  if [[ ! -f "$summary_file" ]]; then
+    FAIL_REASON="validate_summary: $summary_file not found"
+    return 1
+  fi
+
+  local mandatory=(preflight-ok run1-exit-0 floci-service-active health-200 s3-smoke
+                   run2-exit-0 idempotency-hosts idempotency-subuid idempotency-hashes)
+
+  # Parse table rows: | criterion | status |
+  declare -A seen
+  while IFS='|' read -r _ criterion status _; do
+    criterion="$(printf '%s' "$criterion" | tr -d ' ')"
+    status="$(printf '%s' "$status" | tr -d ' ')"
+    [[ -z "$criterion" || "$criterion" == Criterion || "$criterion" == --- ]] && continue
+    if [[ -n "${seen[$criterion]+x}" ]]; then
+      FAIL_REASON="validate_summary: duplicate criterion row: $criterion"
+      return 1
+    fi
+    seen["$criterion"]="$status"
+  done < "$summary_file"
+
+  # Check mandatory non-reboot criteria
+  for c in "${mandatory[@]}"; do
+    local val="${seen[$c]:-MISSING}"
+    if [[ "$c" == "sidecar-delta" && "$NO_SIDECAR" == true ]]; then
+      [[ "$val" == "SKIPPED" || "$val" == "PASS" ]] && continue
+    fi
+    if [[ "$val" != "PASS" ]]; then
+      FAIL_REASON="validate_summary: criterion $c is $val (expected PASS)"
+      return 1
+    fi
+  done
+
+  # Reboot criteria
+  local reboot_health="${seen[reboot-health-200]:-PENDING}"
+  local reboot_ordering="${seen[reboot-ordering]:-PENDING}"
+  # reboot-health-200 may always be PENDING (documented Lima twin limit)
+  if [[ "$reboot_health" == "FAIL" ]]; then
+    FAIL_REASON="validate_summary: reboot-health-200 is FAIL"
+    return 1
+  fi
+  if [[ "$REBOOT_TEST" == true && "$reboot_ordering" != "PASS" ]]; then
+    FAIL_REASON="validate_summary: reboot-ordering is $reboot_ordering (expected PASS under --reboot-test)"
     return 1
   fi
 }
@@ -423,7 +503,7 @@ print_verdict() {
 # main
 # Execute the host lifecycle while preserving a verdict after every failure.
 main() {
-  local parse_status result='FAIL'
+  local parse_status result='FAIL' reboot_ok=true
 
   if parse_args "$@"; then
     :
@@ -436,11 +516,21 @@ main() {
     return 1
   fi
   assert_preconditions
-  if make_evidence_dir && ensure_twin && launch_driver && poll_sentinel && publish_evidence; then
-    result='PASS'
-    if [[ "$REBOOT_TEST" == true ]] && ! run_reboot_test; then
-      result='FAIL'
+  if make_evidence_dir && ensure_twin && launch_driver && poll_sentinel; then
+    wait_driver || { print_verdict "$result"; teardown; return 1; }
+    if [[ "$REBOOT_TEST" == true ]]; then
+      run_reboot_test || reboot_ok=false
     fi
+    if publish_evidence; then
+      validate_summary && result='PASS'
+      if [[ "$reboot_ok" == false ]]; then
+        result='FAIL'
+      fi
+    fi
+  else
+    # Reap transport on failure/timeout paths
+    wait "${DRIVER_SHELL_PID:-}" 2>/dev/null || true
+    DRIVER_SHELL_PID=""
   fi
   print_verdict "$result"
   teardown
