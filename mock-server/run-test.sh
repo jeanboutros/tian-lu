@@ -265,7 +265,7 @@ publish_evidence() {
     return 1
   }
   cp -a "$STAGING"/. "$FINAL"/ || {
-    FAIL_REASON='failed to copy virtiofs evidence to final host directory'
+    FAIL_REASON='failed to copy 9p-mount evidence to final host directory'
     return 1
   }
   (
