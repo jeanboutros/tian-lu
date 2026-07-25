@@ -357,6 +357,13 @@ the harness stays maintainable.
   positional args) is the Lima 1.x form; Lima 2.x rejects it ("at most 1
   arg"). Use `limactl start --name=<instance> <template>` for create+start,
   `limactl start <name>` for an existing instance.
+- **`limactl start` needs `--tty=false` in non-interactive contexts.** Lima
+  2.x opens an interactive editor/confirmation prompt on a TTY by default.
+  Under `make` (non-interactive) or piped stdout the run hangs. Pass
+  `--tty=false` to every `limactl start` call: create, resume, and reboot
+  restart. It is a no-op when already non-interactive. Fixed in
+  `mock-server/dev-twin.sh` (commit 103acfa) and `mock-server/run-test.sh`
+  (commit 93e31b6).
 - **No host-path template variable.** Lima YAML `location` supports
   `{{.Home}}`, `{{.Dir}}`, `{{.Name}}`, `{{.Param.Key}}` etc., but no
   arbitrary-host-path variable. Mount the repo via `--set` yq override
@@ -367,7 +374,20 @@ the harness stays maintainable.
   emitting `cd: ... No such file or directory` on stderr. A bare command
   chain (`test -d … && test -d …`) can pick up a non-zero from this and
   fail. Wrap guest commands in `bash -c '…'` so the `cd` noise does not
-  break the check.
+  break the check. Add `2>/dev/null` to the `limactl shell` call itself to
+  suppress both host-side `limactl` stderr and guest-side `cd` noise.
+  Fixed in `mock-server/dev-twin.sh` (commit a4039d0) and applied to
+  `mock-server/run-test.sh` when the harness was updated.
+- **`sudo systemd-run` runs the driver as root — do not `whoami`-check the
+  driver user.** The test-twin driver is launched via `sudo systemd-run
+  --unit=tianlu-driver` (`run-test.sh launch_driver`), so the driver runs
+  as root. An assertion that checks `whoami` against the Lima-pinned user
+  (`floci-runner`) will always fail — `whoami` returns `root`. To verify
+  the Lima-pinned default user (from `floci-twin.yaml` `user:`), query
+  `getent passwd floci-runner` and check the uid; do NOT use `whoami`. The
+  driver being root is correct (it needs sudo for `setup-floci.sh`); the
+  pinned-user check is about the VM's default login identity, not the
+  driver's runtime identity.
 - **`set -u` empty-array expansion.** `"${arr[@]}"` under `set -u` is an
   unbound-variable error on macOS bash 3.2 when the array is empty. Use
   `${arr[@]+"${arr[@]}"}` (only expand if set).

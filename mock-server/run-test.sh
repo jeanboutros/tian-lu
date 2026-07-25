@@ -166,7 +166,7 @@ ensure_twin() {
   wait_for_running "$FRESH_BUDGET" || return 1
   # Wrap guest commands in `bash -c` so the login shell's host-CWD `cd` noise
   # (the host dir does not exist in the guest) does not break the check.
-  limactl shell "$TWIN_NAME" -- bash -c 'test -d /opt/tianlu && test -d /opt/twin-evidence' || {
+  limactl shell "$TWIN_NAME" -- bash -c 'test -d /opt/tianlu && test -d /opt/twin-evidence' 2>/dev/null || {
     FAIL_REASON='twin mounts missing'
     return 1
   }
@@ -191,8 +191,7 @@ launch_driver() {
   fi
   (
     # ${arr[@]+...} guards the empty-array expansion under set -u (bash 3.2/macOS).
-    limactl shell "$TWIN_NAME" -- sudo systemd-run --quiet --wait --unit=tianlu-driver -- \
-      /opt/tianlu/mock-server/in-vm/run-in-vm.sh ${driver_args[@]+"${driver_args[@]}"}
+    limactl shell "$TWIN_NAME" -- bash -c "sudo systemd-run --quiet --wait --unit=tianlu-driver -- /opt/tianlu/mock-server/in-vm/run-in-vm.sh ${driver_args[*]+"${driver_args[*]}"}" 2>/dev/null
   ) &
   DRIVER_SHELL_PID=$!
 }
@@ -376,13 +375,13 @@ run_reboot_test() {
   local service_active after_val requires_val
   service_active="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
     '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
-     run_as_floci_guest systemctl --user is-active floci.service 2>/dev/null || true')"
+     run_as_floci_guest systemctl --user is-active floci.service 2>/dev/null || true' 2>/dev/null)"
   after_val="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
     '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
-     run_as_floci_guest systemctl --user show --value -p After floci.service 2>/dev/null || true')"
+     run_as_floci_guest systemctl --user show --value -p After floci.service 2>/dev/null || true' 2>/dev/null)"
   requires_val="$(limactl shell "$TWIN_NAME" -- sudo bash -c \
     '. /opt/tianlu/mock-server/in-vm/lib/assert.sh
-     run_as_floci_guest systemctl --user show --value -p Requires floci.service 2>/dev/null || true')"
+     run_as_floci_guest systemctl --user show --value -p Requires floci.service 2>/dev/null || true' 2>/dev/null)"
   if [[ "$service_active" == "active" && \
         " $after_val " == *" podman.socket "* && \
         " $requires_val " == *" podman.socket "* ]]; then

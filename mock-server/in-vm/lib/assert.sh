@@ -148,15 +148,26 @@ write_sentinel() {
 }
 
 # assert_pinned_user
-# Assert the VM is running as the pinned non-root user (floci-runner, uid 1001)
-# and that no host-derived user exists in the non-system uid range 1000-65533.
-# Standalone so it can be unit-tested without pulling in all of step_preflight.
+# Assert the VM's Lima-pinned default user is floci-runner (uid 1001) and that
+# no host-derived user exists in the non-system uid range 1000-65533.
+# NOTE: this checks the PINNED USER IDENTITY (from floci-twin.yaml user:),
+# NOT the driver's runtime user — the driver runs as root via
+# `sudo systemd-run` (run-test.sh launch_driver), so `whoami` is always
+# root here. Query getent passwd instead. Standalone so it can be unit-tested
+# without pulling in all of step_preflight.
 assert_pinned_user() {
   local expected_user="floci-runner"
-  local actual_user
-  actual_user="$(whoami)"
-  if [[ "$actual_user" != "$expected_user" ]]; then
-    FAIL_REASON="pinned-user: whoami=${actual_user} expected ${expected_user}"
+  local expected_uid=1001
+  local entry uid
+
+  entry="$(getent passwd "$expected_user" 2>/dev/null || true)"
+  if [[ -z "$entry" ]]; then
+    FAIL_REASON="pinned-user: expected user ${expected_user} not present in /etc/passwd"
+    return 1
+  fi
+  uid="$(printf '%s' "$entry" | cut -d: -f3)"
+  if [[ "$uid" != "$expected_uid" ]]; then
+    FAIL_REASON="pinned-user: ${expected_user} uid=${uid} expected ${expected_uid}"
     return 1
   fi
 
@@ -169,7 +180,7 @@ assert_pinned_user() {
     return 1
   fi
 
-  log "preflight: user=${expected_user}(uid $(id -u)) ok"
+  log "preflight: pinned-user=${expected_user}(uid ${uid}) ok"
   return 0
 }
 

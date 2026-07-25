@@ -48,6 +48,9 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 - **`verify_health` must use `curl --resolve tianlu-floci:4566:127.0.0.1 -k`** — not `https://localhost`. This sends the correct `Host:` header, matches the cert SAN, and avoids needing DNS resolution.
 - **The script adds `127.0.0.1 tianlu-floci` to `/etc/hosts`** with a managed marker block for host-side tooling. dnsmasq is NOT a prerequisite.
 - **First `make twin-test` after pinning `floci-runner`:** Existing Lima instances have the old host-derived username. Run `make twin-test TWIN_FLAGS="--fresh --destroy"` once to recreate the twin; subsequent runs can use the default `--keep`.
+- **Every `limactl start` call must pass `--tty=false`** — Lima 2.x opens an interactive confirmation prompt on a TTY by default; under `make`/CI it hangs the run. `--tty=false` is a no-op when already non-interactive. Apply to create, resume, and reboot-restart paths in both `run-test.sh` and `dev-twin.sh`.
+- **Every non-interactive `limactl shell` call must be wrapped in `-- bash -c '...' 2>/dev/null`** (or `-- sudo bash -c '...' 2>/dev/null`) — Lima's login shell `cd`s to the host CWD (absent in the guest), producing `cd: /Users/...: No such file or directory` on stderr for every call. The `2>/dev/null` suppresses both host-side `limactl` stderr and the guest-side `cd` noise.
+- **The test-twin driver runs as root (`sudo systemd-run`) — verify the Lima-pinned user via `getent passwd`, not `whoami`.** `run-test.sh` launches the driver with `sudo systemd-run`, so `whoami` inside the driver is always `root`. To verify the Lima-pinned default user (`floci-runner`, uid 1001 from `floci-twin.yaml` `user:`), query `getent passwd floci-runner` and check the uid. Do NOT assert `whoami == floci-runner` — it can never pass from inside the driver.
 
 ## Script conventions
 
