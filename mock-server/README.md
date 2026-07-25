@@ -68,6 +68,11 @@ ordering, and writes a manifest-validated evidence bundle:
 ./mock-server/run-test.sh --fresh --reboot-test
 ```
 
+> **Note (after updating Lima templates):** If you have an existing `floci-twin` Lima
+> instance created before the `floci-runner` username was pinned, delete it first:
+> `make twin-test TWIN_FLAGS="--fresh --destroy"`. The `--keep` default will fail
+> the pinned-user preflight check until the instance is recreated.
+
 ### Flags
 
 | Flag | Effect |

@@ -47,6 +47,7 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 - **The script must poll for the user manager after `loginctl enable-linger`.** `enable-linger` starts the manager asynchronously. Poll `systemctl is-active --quiet user@<UID>.service` then `systemctl --user -M floci@.host is-active --quiet default.target`. Do NOT use `is-system-running` (fails on `degraded`).
 - **`verify_health` must use `curl --resolve tianlu-floci:4566:127.0.0.1 -k`** — not `https://localhost`. This sends the correct `Host:` header, matches the cert SAN, and avoids needing DNS resolution.
 - **The script adds `127.0.0.1 tianlu-floci` to `/etc/hosts`** with a managed marker block for host-side tooling. dnsmasq is NOT a prerequisite.
+- **First `make twin-test` after pinning `floci-runner`:** Existing Lima instances have the old host-derived username. Run `make twin-test TWIN_FLAGS="--fresh --destroy"` once to recreate the twin; subsequent runs can use the default `--keep`.
 
 ## Script conventions
 
