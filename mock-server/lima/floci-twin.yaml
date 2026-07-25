@@ -76,6 +76,12 @@ mounts:
 # Lima-managed admin user with NOPASSWD sudo. The installer is invoked as
 # `sudo /opt/tianlu/setup-floci.sh` from this account.
 user:
+  # Lima defaults user.name to the host macOS username AND user.uid to the host
+  # UID (NOT a lookup of the specified username — see Lima default.yaml PR #2827).
+  # Pinning both removes the host-coupling and makes the twin reproducible across
+  # machines. uid: 1001 avoids collision with the installer-created floci user (uid 1000).
+  name: floci-runner
+  uid: 1001
   passwordlessSudo: true
 
 # --- SSH ------------------------------------------------------------- #
