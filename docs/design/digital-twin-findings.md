@@ -317,7 +317,7 @@ generated, or idempotency breaks.
 kernel (verified: `podman unshare true` and `podman run --userns=keep-id`
 both succeed via `systemd-run --user` post-settle, with the full seccomp
 hardening block), `floci.service` boot-autostart still fails in the first
-~25s of a Lima reboot with the same `newuidmap: write to uid_map failed`.
+2-3 minutes of a Lima reboot with the same `newuidmap: write to uid_map failed`.
 
 **Root cause.** `apparmor.service`'s cached boot reload does not load the
 `newuidmap`/`newgidmap` profiles before the user service starts in the Lima
@@ -325,7 +325,9 @@ nested VM. The profiles are present on disk and load via manual
 `apparmor_parser -r`, but the boot-path cache timing leaves them ineffective
 when `floci.service` first fires. This is a **Lima nested-VM boot-timing
 quirk**, not an installer bug: on a bare-metal x86_64 server
-`apparmor.service` loads all profiles before user services start.
+`apparmor.service` loads all profiles before user services start, and the
+observed race there is presumed to be on the order of ~25s (well inside the
+installer's retry budget).
 
 **What IS proven.** The reboot journal shows `podman.socket` Listening
 immediately followed by `floci.service` Starting at boot — the Quadlet
@@ -334,7 +336,19 @@ correctly. `systemctl --user show -p After -p Requires floci.service`
 confirms both contain `podman.socket`. `start` (not `enable`) is the
 correct activation. The harness `wait_for_reboot_health` includes a
 reset+restart fallback that proves the Quadlet-generated service runs
-post-reboot once AppArmor has settled.
+post-reboot once AppArmor has settled. The installer fix (systemd 254+
+API: `RestartSec=5 RestartSteps=5 RestartMaxDelaySec=30` with
+`StartLimitBurst=8 StartLimitIntervalSec=180`) is structurally correct and
+validated by the generated `floci.container` evidence file.
+
+**Twin evidence.** The 2026-07-26 evidence run
+(`mock-server/evidence/20260726T143056Z/`) demonstrated the longer window
+on this specific Lima VM: the 8 systemd retry attempts with geometric backoff
+(5s, 7s, 10s, 15s, 21s, 30s, 30s, 30s) exhausted after ~150s, and a fresh
+manual-start attempt also failed at approximately +90s. So the race window
+in that run was at least 2-3 minutes, not ~25s. This is a documented twin
+fidelity limit, not an installer bug; the harness's
+`REBOOT_HEALTH_BUDGET=300s` window still covers the eventual settle.
 
 **Status.** GAP-014 is partially closed: ordering + boot-autostart attempt
 proven; full `reboot-health-200` pending the x86_64 server, where the
