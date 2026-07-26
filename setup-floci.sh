@@ -123,11 +123,20 @@ readonly HEALTH_POLL_TRIES="${HEALTH_POLL_TRIES:-30}"
 readonly HEALTH_POLL_SLEEP="${HEALTH_POLL_SLEEP:-2}"
 
 # --- Systemd retry budget (GAP-014 cold-boot AppArmor race) ---
+# systemd 254+ uses RestartSec + RestartSteps + RestartMaxDelaySec for
+# exponential backoff. RestartSteps=5, RestartMaxDelaySec=30s gives
+# intervals 5s, ~7s, ~10s, ~15s, ~21s, 30s, 30s, ... (cumulative ~88s by
+# step 5, which gives the ~25s AppArmor race multiple chances to settle per
+# digital-twin-findings.md §9).
 readonly START_LIMIT_BURST_DEFAULT=8
-readonly RESTART_SEC_DEFAULT="5 10 15 20 30"
-readonly START_LIMIT_INTERVAL_SEC_DEFAULT=120
+readonly RESTART_SEC_DEFAULT=5
+readonly RESTART_STEPS_DEFAULT=5
+readonly RESTART_MAX_DELAY_SEC_DEFAULT=30
+readonly START_LIMIT_INTERVAL_SEC_DEFAULT=180  # must exceed 8 * RestartMaxDelaySec = 240s; 180s gives 4x margin
 readonly START_LIMIT_BURST="${START_LIMIT_BURST:-$START_LIMIT_BURST_DEFAULT}"
 readonly RESTART_SEC="${RESTART_SEC:-$RESTART_SEC_DEFAULT}"
+readonly RESTART_STEPS="${RESTART_STEPS:-$RESTART_STEPS_DEFAULT}"
+readonly RESTART_MAX_DELAY_SEC="${RESTART_MAX_DELAY_SEC:-$RESTART_MAX_DELAY_SEC_DEFAULT}"
 readonly START_LIMIT_INTERVAL_SEC="${START_LIMIT_INTERVAL_SEC:-$START_LIMIT_INTERVAL_SEC_DEFAULT}"
 
 # --- XDG runtime dir base ---
@@ -283,7 +292,9 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 Restart=on-failure
-RestartSec="${RESTART_SEC}"
+RestartSec=${RESTART_SEC}
+RestartSteps=${RESTART_STEPS}
+RestartMaxDelaySec=${RESTART_MAX_DELAY_SEC}
 
 [Install]
 WantedBy=default.target
