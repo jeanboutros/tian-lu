@@ -14,6 +14,36 @@ log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
 }
 
+# log_level <LEVEL> <msg...>
+# Levelled colorized logger. Honors NO_COLOR and non-TTY stdout.
+# Levels: INFO, WARN, PASS, FAIL. Color via tput; falls back to ANSI when
+# tput is unavailable. NO_COLOR or non-TTY → plain "[LEVEL] msg".
+log_level() {
+  local level=${1-INFO}
+  shift || true
+  local msg=$*
+  local color="" reset="" use_color=0
+
+  if [[ -t 2 && -z "${NO_COLOR:-}" ]] && [[ "${CLICOLOR:-1}" != "0" ]]; then
+    if command -v tput >/dev/null 2>&1 && tput setaf 0 >/dev/null 2>&1; then
+      case "$level" in
+        INFO) color=$(tput setaf 4 2>/dev/null || true) ;;
+        WARN) color=$(tput setaf 3 2>/dev/null || true) ;;
+        PASS) color=$(tput setaf 2 2>/dev/null || true) ;;
+        FAIL) color=$(tput setaf 1 2>/dev/null || true) ;;
+      esac
+      reset=$(tput sgr0 2>/dev/null || true)
+      if [[ -n "$color" ]]; then use_color=1; fi
+    fi
+  fi
+
+  if (( use_color )); then
+    printf '[%s] [%s] %s%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$color" "$msg" "$reset" >&2
+  else
+    printf '[%s] [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$msg" >&2
+  fi
+}
+
 # assert_eq <expected> <actual> <label>
 # Compare two strings and record a failure reason on mismatch.
 assert_eq() {
@@ -119,6 +149,16 @@ snapshot_state() {
 
     printf '### run_as_floci_guest systemctl --user is-active floci.service\n'
     run_as_floci_guest systemctl --user is-active floci.service
+    printf '\n'
+
+    printf '### ownership and mode of key Floci paths\n'
+    for _p in /home/floci /home/floci/floci-data /home/floci/floci.env /home/floci/.config/containers/systemd/floci.container; do
+      if [[ -e "$_p" ]]; then
+        stat -c '%n %a %U:%G' "$_p"
+      else
+        printf '%s NOT_FOUND\n' "$_p"
+      fi
+    done
     printf '\n'
   } >"$out_file"
 }
