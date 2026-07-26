@@ -122,6 +122,14 @@ readonly USER_MANAGER_POLL_SLEEP="${USER_MANAGER_POLL_SLEEP:-1}"
 readonly HEALTH_POLL_TRIES="${HEALTH_POLL_TRIES:-30}"
 readonly HEALTH_POLL_SLEEP="${HEALTH_POLL_SLEEP:-2}"
 
+# --- Systemd retry budget (GAP-014 cold-boot AppArmor race) ---
+readonly START_LIMIT_BURST_DEFAULT=8
+readonly RESTART_SEC_DEFAULT="5 10 15 20 30"
+readonly START_LIMIT_INTERVAL_SEC_DEFAULT=120
+readonly START_LIMIT_BURST="${START_LIMIT_BURST:-$START_LIMIT_BURST_DEFAULT}"
+readonly RESTART_SEC="${RESTART_SEC:-$RESTART_SEC_DEFAULT}"
+readonly START_LIMIT_INTERVAL_SEC="${START_LIMIT_INTERVAL_SEC:-$START_LIMIT_INTERVAL_SEC_DEFAULT}"
+
 # --- XDG runtime dir base ---
 readonly XDG_RUNTIME_BASE="${XDG_RUNTIME_BASE:-/run/user}"
 
@@ -248,8 +256,8 @@ write_quadlet_unit() {
 Description=Floci (AWS emulator) rootless container
 After=podman.socket
 Requires=podman.socket
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=${START_LIMIT_INTERVAL_SEC}
+StartLimitBurst=${START_LIMIT_BURST}
 
 [Container]
 Image=${FLOCI_IMAGE}
@@ -275,7 +283,7 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 Restart=on-failure
-RestartSec=5
+RestartSec="${RESTART_SEC}"
 
 [Install]
 WantedBy=default.target
