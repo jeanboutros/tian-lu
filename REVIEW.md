@@ -177,9 +177,11 @@ ExecStart=/usr/bin/podman run --rm --name tianlu-floci \
   docker.io/floci/floci:1.5.33-compat
 ExecStop=/usr/bin/podman stop --time 30 tianlu-floci
 Restart=on-failure
-RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# Progressive backoff gives the cold-boot AppArmor profile-attach race time to settle;
+# see docs/design/digital-twin-findings.md §9 for the empirical ~25s measurement.
+RestartSec="5 10 15 20 30"   # progressive backoff (5+10+15+20+30=80s)
+StartLimitIntervalSec=120     # window must exceed cum. backoff
+StartLimitBurst=8             # 8 retries over ~80s = ~3x the empirical 25s cold-boot AppArmor race
 # Hardening — seccomp-based subset only (no namespace creation or SUID stripping)
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
