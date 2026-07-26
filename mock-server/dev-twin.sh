@@ -15,7 +15,7 @@ readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_MARKER_END="# END tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_ENTRY="127.0.0.1 tianlu-floci"
 readonly DEV_HEALTH_URL="http://tianlu-floci:4566/_floci/init"
-readonly DEV_HEALTH_TRIES=30
+readonly DEV_HEALTH_TRIES=60
 readonly DEV_HEALTH_SLEEP=2
 readonly DEV_START_BUDGET_FIRST=600
 readonly DEV_START_BUDGET_RESUME=120
@@ -235,7 +235,7 @@ _wait_running() {
 _health_check() {
   local i code
   for ((i = 0; i < DEV_HEALTH_TRIES; i++)); do
-    code="$(curl -sk --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo "000")"
+    code="$(curl -s --connect-timeout 10 --max-time 15 --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo "000")"
     if [[ "$code" == "200" ]]; then
       return 0
     fi
@@ -506,10 +506,10 @@ dev_env() {
     printf '\n[floci-dev]\naws_access_key_id = test\naws_secret_access_key = test\n' >> "$creds_file"
   fi
   if "$export_only"; then
-    printf 'export AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n'
+    printf 'export AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=http://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n'
   else
     # shellcheck disable=SC2016
-    printf '\n# AWS CLI configured for floci-dev twin:\n# Profile "floci-dev" added to ~/.aws/config and ~/.aws/credentials\n#\n# To connect in this shell:\nexport AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=https://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n#\n# Or: eval "$(make dev-env -- --export)"\n'
+    printf '\n# AWS CLI configured for floci-dev twin:\n# Profile "floci-dev" added to ~/.aws/config and ~/.aws/credentials\n#\n# To connect in this shell:\nexport AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=http://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n#\n# Or: eval "$(make dev-env -- --export)"\n'
   fi
 }
 
