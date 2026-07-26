@@ -230,20 +230,26 @@ _source_and_run() {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
   grep -q "StartLimitBurst=8" "$FLOCI_QUADLET_FILE"
-  grep -q "StartLimitIntervalSec=120" "$FLOCI_QUADLET_FILE"
-  grep -q 'RestartSec="5 10 15 20 30"' "$FLOCI_QUADLET_FILE"
+  grep -q "StartLimitIntervalSec=180" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSec=5$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSteps=5$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartMaxDelaySec=30$" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit honors env var overrides for retry budget" {
   _setup_real_fs_cmds
   export START_LIMIT_BURST=3
-  export RESTART_SEC="1 2 3"
-  export START_LIMIT_INTERVAL_SEC=200
+  export RESTART_SEC=2
+  export RESTART_STEPS=6
+  export RESTART_MAX_DELAY_SEC=45
+  export START_LIMIT_INTERVAL_SEC=400
   _source_and_run "write_quadlet_unit"
   grep -q "StartLimitBurst=3" "$FLOCI_QUADLET_FILE"
-  grep -q "StartLimitIntervalSec=200" "$FLOCI_QUADLET_FILE"
-  grep -q 'RestartSec="1 2 3"' "$FLOCI_QUADLET_FILE"
-  unset START_LIMIT_BURST RESTART_SEC START_LIMIT_INTERVAL_SEC
+  grep -q "StartLimitIntervalSec=400" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSec=2$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSteps=6$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartMaxDelaySec=45$" "$FLOCI_QUADLET_FILE"
+  unset START_LIMIT_BURST RESTART_SEC RESTART_STEPS RESTART_MAX_DELAY_SEC START_LIMIT_INTERVAL_SEC
 }
 
 @test "write_quadlet_unit file does not contain ProtectHome" {
