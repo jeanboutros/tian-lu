@@ -215,3 +215,21 @@ ls -dt mock-server/evidence/*/ | head -1
 | `mock-server/**` (harness) | `make check` → `make twin-test` |
 | `tests/**` (unit tests) | `make test` |
 | `docs/**` only | nothing (no twin run needed; CI runs lint+unit regardless of path) |
+
+---
+
+## 4. Local development environment
+
+For interactive local AWS development (not testing), use the persistent dev twin. Unlike the test twin, this environment persists AWS state across restarts.
+
+```bash
+brew install lima qemu   # one-time prerequisites
+make dev-up              # create or resume (~30s resume, ~10-15 min first run)
+eval "$(make dev-env -- --export)"  # load AWS CLI profile into this shell
+make dev-status          # check instance, disk, service, and health
+make dev-down            # stop without losing data
+make dev-recreate        # rebuild VM OS, keep all AWS data
+make dev-reset CONFIRM=reset  # erase VM and all AWS data (permanent)
+```
+
+See `mock-server/README.md` for the complete target reference and `AGENTS.md` for gotchas.

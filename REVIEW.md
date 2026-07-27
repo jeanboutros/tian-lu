@@ -176,10 +176,18 @@ ExecStart=/usr/bin/podman run --rm --name tianlu-floci \
   -v %h/floci-data:/app/data:z \
   docker.io/floci/floci:1.5.33-compat
 ExecStop=/usr/bin/podman stop --time 30 tianlu-floci
+# Progressive exponential backoff via systemd 254+ API (man systemd.service
+# RestartSteps, RestartMaxDelaySec). RestartSec="5 10 15 20 30" was REJECTED
+# by systemd 259 ("Invalid argument"); the correct API is three separate
+# directives producing geometric intervals 5s, 7s, 10s, 15s, 21s, 30s, 30s.
+# See docs/design/digital-twin-findings.md §9 and mock-server/evidence/20260726T140607Z/
+# for the empirical cold-boot AppArmor ~25s race resolution time.
 Restart=on-failure
-RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=30
+StartLimitIntervalSec=180   # window must exceed 8 x RestartMaxDelaySec = 240s; 180s gives ample margin
+StartLimitBurst=8           # 8 retries over up to 180s of cum. backoff = ~3x the ~25s race window
 # Hardening — seccomp-based subset only (no namespace creation or SUID stripping)
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

@@ -100,6 +100,17 @@ teardown() {
   [ ! -e "${TEST_TMP}/DONE.tmp" ]
 }
 
+@test "write_sentinel creates a DONE file atomically" {
+  run bash -c '
+    source "$ASSERT_LIB"
+    dir="'"$TEST_TMP"'"
+    write_sentinel "$dir/DONE"
+    test -f "$dir/DONE" && cat "$dir/DONE"
+  '
+  [ "$status" -eq 0 ]
+  [ "$output" = "DONE" ]
+}
+
 @test "run_as_floci_guest constructs the exact floci environment" {
   run bash -c 'source "$ASSERT_LIB"; run_as_floci_guest true'
   [ "$status" -eq 0 ]

@@ -8,6 +8,8 @@ setup() {
   setup_stub_env
   # Export variables that setup-floci.sh CONFIG block reads as overrides.
   export FLOCI_HOME
+  export FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOME}/floci-data"
+  export FLOCI_DATA_DIR="${FLOCI_HOME}/floci-data"
   export QUADLET_UNIT_DIR="${FLOCI_HOME}/.config/containers/systemd"
   export FLOCI_QUADLET_FILE="${QUADLET_UNIT_DIR}/floci.container"
 
@@ -105,6 +107,8 @@ EOF
 # ---------------------------------------------------------------------------
 _source_and_run() {
   bash -c "export FLOCI_HOME='${FLOCI_HOME}'; \
+           export FLOCI_HOST_PERSISTENT_PATH='${FLOCI_HOST_PERSISTENT_PATH}'; \
+           export FLOCI_DATA_DIR='${FLOCI_DATA_DIR}'; \
            export QUADLET_UNIT_DIR='${QUADLET_UNIT_DIR}'; \
            export FLOCI_QUADLET_FILE='${FLOCI_QUADLET_FILE}'; \
            export STUB_LOG='${STUB_LOG}'; \
@@ -173,7 +177,22 @@ _source_and_run() {
 @test "write_quadlet_unit file contains data Volume ending in :z" {
   _setup_real_fs_cmds
   _source_and_run "write_quadlet_unit"
-  grep -q "Volume=%h/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+  grep -q "Volume=${FLOCI_HOME}/floci-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit: uses configurable host persistence path" {
+  export FLOCI_HOST_PERSISTENT_PATH=/tmp/custom-data
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "Volume=/tmp/custom-data:/app/data:z" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit: host path override wins over FLOCI_DATA_DIR" {
+  export FLOCI_HOST_PERSISTENT_PATH=/tmp/canonical
+  export FLOCI_DATA_DIR=/tmp/other
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "Volume=/tmp/canonical:/app/data:z" "$FLOCI_QUADLET_FILE"
 }
 
 @test "write_quadlet_unit file contains UserNS keep-id mapping for the Floci image user" {
@@ -205,6 +224,32 @@ _source_and_run() {
   grep -q "LockPersonality=true" "$FLOCI_QUADLET_FILE"
   grep -q "RestrictRealtime=true" "$FLOCI_QUADLET_FILE"
   grep -q "SystemCallArchitectures=native" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit emits GAP-014 systemd retry budget" {
+  _setup_real_fs_cmds
+  _source_and_run "write_quadlet_unit"
+  grep -q "StartLimitBurst=8" "$FLOCI_QUADLET_FILE"
+  grep -q "StartLimitIntervalSec=180" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSec=5$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSteps=5$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartMaxDelaySec=30$" "$FLOCI_QUADLET_FILE"
+}
+
+@test "write_quadlet_unit honors env var overrides for retry budget" {
+  _setup_real_fs_cmds
+  export START_LIMIT_BURST=3
+  export RESTART_SEC=2
+  export RESTART_STEPS=6
+  export RESTART_MAX_DELAY_SEC=45
+  export START_LIMIT_INTERVAL_SEC=400
+  _source_and_run "write_quadlet_unit"
+  grep -q "StartLimitBurst=3" "$FLOCI_QUADLET_FILE"
+  grep -q "StartLimitIntervalSec=400" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSec=2$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartSteps=6$" "$FLOCI_QUADLET_FILE"
+  grep -q "^RestartMaxDelaySec=45$" "$FLOCI_QUADLET_FILE"
+  unset START_LIMIT_BURST RESTART_SEC RESTART_STEPS RESTART_MAX_DELAY_SEC START_LIMIT_INTERVAL_SEC
 }
 
 @test "write_quadlet_unit file does not contain ProtectHome" {

@@ -22,17 +22,22 @@ SHELL := /bin/bash
 SCRIPT := setup-floci.sh
 STUB := tests/stubs/_stub
 MOCK_STUB := mock-server/tests/stubs/_stub
-MOCK_SHELLS := mock-server/run-test.sh mock-server/in-vm/run-in-vm.sh mock-server/in-vm/lib/assert.sh
+DEV_TWIN_SCRIPT := mock-server/dev-twin.sh
+MOCK_SHELLS := mock-server/run-test.sh mock-server/in-vm/run-in-vm.sh mock-server/in-vm/lib/assert.sh $(DEV_TWIN_SCRIPT)
 MOCK_SUDO := mock-server/tests/stubs/bin/sudo
 HOOK := scripts/pre-commit
+HELP_SCRIPT := scripts/help.sh
 TWIN_FLAGS ?= --fresh --reboot-test
 CI_TEST_IMAGES ?= ubuntu:24.04 ubuntu:26.04
 
-.PHONY: lint test check ci-test twin-test
+.PHONY: help lint test check ci-test twin-test dev-up dev-down dev-status dev-shell dev-recreate dev-reset dev-env
+
+help:
+	@./scripts/help.sh
 
 lint:
-	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK)
-	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK)
+	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK) $(HELP_SCRIPT)
+	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK) $(HELP_SCRIPT)
 
 test:
 	bats tests/
@@ -64,3 +69,24 @@ ci-test:
 
 twin-test:
 	./mock-server/run-test.sh $(TWIN_FLAGS)
+
+dev-up:
+	$(DEV_TWIN_SCRIPT) up
+
+dev-down:
+	$(DEV_TWIN_SCRIPT) down
+
+dev-status:
+	$(DEV_TWIN_SCRIPT) status
+
+dev-shell:
+	$(DEV_TWIN_SCRIPT) shell
+
+dev-recreate:
+	$(DEV_TWIN_SCRIPT) recreate
+
+dev-reset:
+	$(DEV_TWIN_SCRIPT) reset
+
+dev-env:
+	$(DEV_TWIN_SCRIPT) env

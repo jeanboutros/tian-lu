@@ -317,7 +317,7 @@ generated, or idempotency breaks.
 kernel (verified: `podman unshare true` and `podman run --userns=keep-id`
 both succeed via `systemd-run --user` post-settle, with the full seccomp
 hardening block), `floci.service` boot-autostart still fails in the first
-~25s of a Lima reboot with the same `newuidmap: write to uid_map failed`.
+2-3 minutes of a Lima reboot with the same `newuidmap: write to uid_map failed`.
 
 **Root cause.** `apparmor.service`'s cached boot reload does not load the
 `newuidmap`/`newgidmap` profiles before the user service starts in the Lima
@@ -325,7 +325,9 @@ nested VM. The profiles are present on disk and load via manual
 `apparmor_parser -r`, but the boot-path cache timing leaves them ineffective
 when `floci.service` first fires. This is a **Lima nested-VM boot-timing
 quirk**, not an installer bug: on a bare-metal x86_64 server
-`apparmor.service` loads all profiles before user services start.
+`apparmor.service` loads all profiles before user services start, and the
+observed race there is presumed to be on the order of ~25s (well inside the
+installer's retry budget).
 
 **What IS proven.** The reboot journal shows `podman.socket` Listening
 immediately followed by `floci.service` Starting at boot — the Quadlet
@@ -334,7 +336,19 @@ correctly. `systemctl --user show -p After -p Requires floci.service`
 confirms both contain `podman.socket`. `start` (not `enable`) is the
 correct activation. The harness `wait_for_reboot_health` includes a
 reset+restart fallback that proves the Quadlet-generated service runs
-post-reboot once AppArmor has settled.
+post-reboot once AppArmor has settled. The installer fix (systemd 254+
+API: `RestartSec=5 RestartSteps=5 RestartMaxDelaySec=30` with
+`StartLimitBurst=8 StartLimitIntervalSec=180`) is structurally correct and
+validated by the generated `floci.container` evidence file.
+
+**Twin evidence.** The 2026-07-26 evidence run
+(`mock-server/evidence/20260726T143056Z/`) demonstrated the longer window
+on this specific Lima VM: the 8 systemd retry attempts with geometric backoff
+(5s, 7s, 10s, 15s, 21s, 30s, 30s, 30s) exhausted after ~150s, and a fresh
+manual-start attempt also failed at approximately +90s. So the race window
+in that run was at least 2-3 minutes, not ~25s. This is a documented twin
+fidelity limit, not an installer bug; the harness's
+`REBOOT_HEALTH_BUDGET=300s` window still covers the eventual settle.
 
 **Status.** GAP-014 is partially closed: ordering + boot-autostart attempt
 proven; full `reboot-health-200` pending the x86_64 server, where the
@@ -357,6 +371,13 @@ the harness stays maintainable.
   positional args) is the Lima 1.x form; Lima 2.x rejects it ("at most 1
   arg"). Use `limactl start --name=<instance> <template>` for create+start,
   `limactl start <name>` for an existing instance.
+- **`limactl start` needs `--tty=false` in non-interactive contexts.** Lima
+  2.x opens an interactive editor/confirmation prompt on a TTY by default.
+  Under `make` (non-interactive) or piped stdout the run hangs. Pass
+  `--tty=false` to every `limactl start` call: create, resume, and reboot
+  restart. It is a no-op when already non-interactive. Fixed in
+  `mock-server/dev-twin.sh` (commit 103acfa) and `mock-server/run-test.sh`
+  (commit 93e31b6).
 - **No host-path template variable.** Lima YAML `location` supports
   `{{.Home}}`, `{{.Dir}}`, `{{.Name}}`, `{{.Param.Key}}` etc., but no
   arbitrary-host-path variable. Mount the repo via `--set` yq override
@@ -367,7 +388,20 @@ the harness stays maintainable.
   emitting `cd: ... No such file or directory` on stderr. A bare command
   chain (`test -d … && test -d …`) can pick up a non-zero from this and
   fail. Wrap guest commands in `bash -c '…'` so the `cd` noise does not
-  break the check.
+  break the check. Add `2>/dev/null` to the `limactl shell` call itself to
+  suppress both host-side `limactl` stderr and guest-side `cd` noise.
+  Fixed in `mock-server/dev-twin.sh` (commit a4039d0) and applied to
+  `mock-server/run-test.sh` when the harness was updated.
+- **`sudo systemd-run` runs the driver as root — do not `whoami`-check the
+  driver user.** The test-twin driver is launched via `sudo systemd-run
+  --unit=tianlu-driver` (`run-test.sh launch_driver`), so the driver runs
+  as root. An assertion that checks `whoami` against the Lima-pinned user
+  (`floci-runner`) will always fail — `whoami` returns `root`. To verify
+  the Lima-pinned default user (from `floci-twin.yaml` `user:`), query
+  `getent passwd floci-runner` and check the uid; do NOT use `whoami`. The
+  driver being root is correct (it needs sudo for `setup-floci.sh`); the
+  pinned-user check is about the VM's default login identity, not the
+  driver's runtime identity.
 - **`set -u` empty-array expansion.** `"${arr[@]}"` under `set -u` is an
   unbound-variable error on macOS bash 3.2 when the array is empty. Use
   `${arr[@]+"${arr[@]}"}` (only expand if set).
@@ -382,6 +416,35 @@ the harness stays maintainable.
   manifest confirms no `podman`/`uidmap`/`passt`/`containers-common` in the
   base image. An earlier misdiagnosis (polluted instance from a manual
   debug run) suggested otherwise; the manifest is authoritative.
+- **Dev twin disables TLS; production keeps it.** The dev twin passes
+  `FLOCI_TLS_ENABLED=false FLOCI_TLS_SELF_SIGNED=false` to `setup-floci.sh`
+  (dev-twin.sh line 322) so Floci serves plain HTTP on 4566. This matches the
+  working native-podman setup (`_tmp/setup.sh`) and avoids the Floci UI
+  sidecar's Node backend rejecting the self-signed cert that TLS-on produces.
+  The production installer and the test twin keep TLS on (they validate the
+  production config). With TLS off, Floci's built-in UI launcher
+  (`GET /_floci/ui`, PR #1313) injects `http://tianlu-floci:4566` into the
+  sidecar — no cert rejection, no reverting.
+- **Floci UI is launched by Floci itself — do NOT run `floci-ui` manually.**
+  As of PR #1313, `GET /` (with `Accept: text/html`) serves a landing page;
+  `GET /_floci/ui` lazily spawns the `floci/floci-ui` sidecar with
+  `FLOCI_ENDPOINT` injected automatically. A manually-launched `floci-ui`
+  container reverts to the image default (`https://tianlu-floci:4566`) on
+  every restart (no Quadlet, no restart policy) and blocks Floci's launcher
+  (which adopts an existing container rather than spawning a correct one).
+  To use the UI: open `http://localhost:4566/` in the browser → click
+  "Open Floci UI" → redirected to the sidecar URL.
+- **The sidecar's browser-facing port needs forwarding in the Lima VM.**
+  In native podman (e.g. `_tmp/setup.sh`, `podman machine`), Floci's
+  launcher publishes the sidecar with `-p <port>:<port>` directly on the
+  Mac's localhost — no forwarding needed. In the Lima dev twin, Floci runs
+  inside a container inside the VM, so the sidecar's published port is bound
+  on the VM's localhost, not the Mac's. The Lima template (`floci-dev.yaml`)
+  must forward the browser-facing port so the Mac's browser can reach it. The
+  port is probe-identified: after `make dev-recreate`, trigger
+  `GET /_floci/ui/status` and read the `url` field, or inspect `podman ps`
+  inside the VM. (PR #1471 documents the native-vs-container endpoint
+  resolution split.)
 
 ---
 

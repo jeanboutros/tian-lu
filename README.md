@@ -156,6 +156,40 @@ runtime behavior on x86_64 is out of scope for the twin and must be validated
 on an x86_64 host. See
 [`docs/design/digital-twin-testing-design.md`](docs/design/digital-twin-testing-design.md).
 
+### Persistent local dev environment
+
+Use the dev twin for interactive local AWS development. Unlike the test twin (`make twin-test`), the dev twin is persistent — AWS state survives `make dev-down` / `make dev-up` and even `make dev-recreate`.
+
+```bash
+# Prerequisites (one-time):
+brew install lima qemu   # Lima VM + QEMU for Apple Silicon
+
+# First-time setup (~10–15 min on first run; ~30s on subsequent dev-up):
+make dev-up
+
+# Configure the AWS CLI and load env vars into this shell:
+eval "$(make dev-env -- --export)"
+# Then use the AWS CLI normally (self-signed TLS — --no-verify-ssl or profile ca_bundle):
+aws s3 mb s3://my-bucket
+aws s3 ls
+```
+
+| Target | What it does |
+| --- | --- |
+| `make dev-up` | Create or resume the dev VM; runs installer only on first creation |
+| `make dev-down` | Stop the VM (data preserved) |
+| `make dev-status` | Show instance, disk, service, and health state |
+| `make dev-shell` | Open an interactive shell inside the VM |
+| `make dev-env` | Configure AWS CLI profile and print export instructions |
+| `make dev-recreate` | Delete and recreate the VM OS; retain all AWS data |
+| `make dev-reset CONFIRM=reset` | Delete VM **and** data disk — permanent |
+
+**Persistent storage**: AWS state lives on the standalone `floci-dev-data` disk (30 GiB). The disk survives `make dev-recreate` and `make dev-down`/`dev-up`. Only `make dev-reset` deletes it.
+
+**Ports**: all user-facing service ports are forwarded to `127.0.0.1`. Lambda Runtime API ports **9200–9299 are not forwarded** (internal only).
+
+**Isolation**: the dev environment uses a separate `floci-dev` Lima instance and `floci-dev-data` disk; it shares no state with `make twin-test` (`floci-twin`).
+
 ## Repository map
 
 | Path | What it is |
@@ -172,6 +206,8 @@ on an x86_64 host. See
 | `docs/testing-guide.md` | How to run the three test tiers + wire them to run after every `setup-floci.sh` change. |
 | `docs/scraped/INDEX.md` | Keyword map of scraped Floci documentation. |
 | `mock-server/` | Lima digital-twin harness (twin definition, guest driver, host orchestrator, evidence). |
+| `mock-server/dev-twin.sh` | Persistent local dev lifecycle script (`make dev-up`, `dev-down`, `dev-status`, `dev-shell`, `dev-recreate`, `dev-reset`, `dev-env`). |
+| `mock-server/lima/floci-dev.yaml` | Lima template for the persistent dev VM (Ubuntu 26.04 arm64 QEMU). |
 
 ## Roadmap
 

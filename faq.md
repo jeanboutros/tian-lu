@@ -82,3 +82,47 @@ make twin-test      # full Lima digital-twin end-to-end run (~15–30 min, Apple
 ```
 
 See `docs/testing-guide.md` for the full guide.
+
+## To start the local Floci dev environment (Mac)
+
+```bash
+make dev-up
+```
+
+First run takes ~10–15 min (boots Ubuntu VM + installs Floci). Subsequent starts take ~30 seconds.
+
+## To configure the AWS CLI for the dev environment
+
+```bash
+eval "$(make dev-env -- --export)"
+```
+
+This sets `AWS_PROFILE=floci-dev`, `AWS_ENDPOINT_URL=https://tianlu-floci:4566`, and `AWS_DEFAULT_REGION=eu-west-1` in the current shell. A `floci-dev` profile is also written to `~/.aws/config` and `~/.aws/credentials` (dummy credentials — Floci accepts any non-empty values).
+
+## To stop the dev environment (preserving all AWS data)
+
+```bash
+make dev-down
+```
+
+## To check dev environment status
+
+```bash
+make dev-status
+```
+
+## To rebuild the dev VM OS without losing AWS data
+
+```bash
+make dev-recreate
+```
+
+This deletes the Lima instance and creates a fresh one, but the standalone `floci-dev-data` disk (and all AWS state on it) is preserved.
+
+## To permanently erase the dev environment
+
+```bash
+make dev-reset CONFIRM=reset
+```
+
+This deletes the VM **and** the data disk. All AWS state is lost. Confirmation is required.

@@ -53,6 +53,17 @@ _stat_mode() {
 # create_data_directory
 # ===========================================================================
 
+@test "create_data_directory: uses FLOCI_HOST_PERSISTENT_PATH override" {
+  local custom_path=/tmp/custom-data
+  rm -rf "$custom_path"
+
+  run _run_fn "export FLOCI_HOST_PERSISTENT_PATH='${custom_path}'" "create_data_directory"
+  [ "$status" -eq 0 ]
+  [ -d "$custom_path" ]
+  [ "$(_stat_mode "$custom_path")" = "700" ]
+  rm -rf "$custom_path"
+}
+
 @test "create_data_directory: creates the dir with mode 0700" {
   run _run_fn "" "create_data_directory"
   [ "$status" -eq 0 ]
@@ -229,6 +240,43 @@ _stat_mode() {
 # write_env_file
 # ===========================================================================
 
+@test "write_env_file: emits the configurable host persistence path" {
+  run _run_fn \
+    "export FLOCI_HOST_PERSISTENT_PATH=/tmp/custom-data; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_STORAGE_HOST_PERSISTENT_PATH=/tmp/custom-data$' "$FLOCI_ENV_FILE"
+}
+
+@test "persistence path: no override uses FLOCI_HOME/floci-data everywhere" {
+  local default_path="${FLOCI_HOME}/floci-data"
+
+  run _run_fn \
+    "unset FLOCI_HOST_PERSISTENT_PATH FLOCI_DATA_DIR; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; create_data_directory; write_env_file; printf '%s' \"\$FLOCI_DATA_DIR\""
+  [ "$status" -eq 0 ]
+  [ -d "$default_path" ]
+  [ "$output" = "$default_path" ]
+  grep -qF "FLOCI_STORAGE_HOST_PERSISTENT_PATH=${default_path}" "$FLOCI_ENV_FILE"
+}
+
+@test "create_data_directory: FLOCI_DATA_DIR remains a fallback alias" {
+  local alternate_path=/tmp/alt-data
+  rm -rf "$alternate_path"
+
+  run _run_fn "unset FLOCI_HOST_PERSISTENT_PATH; export FLOCI_DATA_DIR='${alternate_path}'" "create_data_directory"
+  [ "$status" -eq 0 ]
+  [ -d "$alternate_path" ]
+  [ "$(_stat_mode "$alternate_path")" = "700" ]
+  rm -rf "$alternate_path"
+}
+
+@test "persistence path: relative host path is rejected" {
+  run _run_fn "export FLOCI_HOST_PERSISTENT_PATH=relative/path" "true"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must be absolute"* ]]
+}
+
 @test "write_env_file: renders all §12 keys with correct values" {
   run _run_fn \
     "export STUB_OUT_OPENSSL='deadbeefcafe'" \
@@ -241,7 +289,7 @@ _stat_mode() {
   grep -q '^FLOCI_DEFAULT_ACCOUNT_ID=000000000000$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_STORAGE_MODE=persistent$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_STORAGE_PERSISTENT_PATH=/app/data$' "$FLOCI_ENV_FILE"
-  grep -q "^FLOCI_STORAGE_HOST_PERSISTENT_PATH=${FLOCI_HOME}/floci-data\$" "$FLOCI_ENV_FILE"
+  grep -q "^FLOCI_STORAGE_HOST_PERSISTENT_PATH=${FLOCI_DATA_DIR}$" "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_TLS_ENABLED=true$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_TLS_SELF_SIGNED=true$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_SERVICES_DOCKER_NETWORK=floci-net$' "$FLOCI_ENV_FILE"

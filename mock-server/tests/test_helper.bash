@@ -22,3 +22,5 @@ teardown_stub_env() {
 stub_calls() {
   grep -E "^$1( |$)" "${STUB_LOG}" || true
 }
+
+export DEV_SCRIPT="${MOCK_ROOT}/dev-twin.sh"

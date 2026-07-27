@@ -56,7 +56,7 @@ readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-1}"
 readonly FLOCI_DEFAULT_ACCOUNT_ID="${FLOCI_DEFAULT_ACCOUNT_ID:-000000000000}"
 readonly FLOCI_STORAGE_MODE="${FLOCI_STORAGE_MODE:-persistent}"
 readonly FLOCI_STORAGE_PERSISTENT_PATH="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
-readonly FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOST_PERSISTENT_PATH:-${FLOCI_HOME}/floci-data}"
+FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOST_PERSISTENT_PATH:-${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}}"
 readonly FLOCI_TLS_ENABLED="${FLOCI_TLS_ENABLED:-true}"
 readonly FLOCI_TLS_SELF_SIGNED="${FLOCI_TLS_SELF_SIGNED:-true}"
 
@@ -96,9 +96,12 @@ readonly UFW_RFC1918_SUBNETS=(
 # --- Paths ---
 readonly FLOCI_ENV_DIR="${FLOCI_ENV_DIR:-${FLOCI_HOME}/.config/floci}"
 readonly FLOCI_ENV_FILE="${FLOCI_ENV_FILE:-${FLOCI_ENV_DIR}/floci.env}"
-readonly FLOCI_DATA_DIR="${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}"
+readonly FLOCI_DATA_DIR="${FLOCI_HOST_PERSISTENT_PATH}"
 readonly QUADLET_UNIT_DIR="${QUADLET_UNIT_DIR:-${FLOCI_HOME}/.config/containers/systemd}"
 readonly FLOCI_QUADLET_FILE="${FLOCI_QUADLET_FILE:-${QUADLET_UNIT_DIR}/floci.container}"
+readonly FLOCI_HOST_PERSISTENT_PATH
+[[ "$FLOCI_HOST_PERSISTENT_PATH" == /* ]] || { printf 'FLOCI_HOST_PERSISTENT_PATH must be absolute\n' >&2; exit 1; }
+[[ "$FLOCI_HOST_PERSISTENT_PATH" != *$'\n'* && "$FLOCI_HOST_PERSISTENT_PATH" != *:* && "$FLOCI_HOST_PERSISTENT_PATH" != *' '* && "$FLOCI_HOST_PERSISTENT_PATH" != *$'\t'* && "$FLOCI_HOST_PERSISTENT_PATH" != *'"'* && "$FLOCI_HOST_PERSISTENT_PATH" != *\\* && "$FLOCI_HOST_PERSISTENT_PATH" != *'%'* ]] || { printf 'FLOCI_HOST_PERSISTENT_PATH must not contain newlines, colons, whitespace, quotes, backslashes, or %% characters\n' >&2; exit 1; }
 
 # --- /etc/hosts ---
 readonly HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
@@ -118,6 +121,23 @@ readonly USER_MANAGER_POLL_SLEEP="${USER_MANAGER_POLL_SLEEP:-1}"
 # --- Health check poll ---
 readonly HEALTH_POLL_TRIES="${HEALTH_POLL_TRIES:-30}"
 readonly HEALTH_POLL_SLEEP="${HEALTH_POLL_SLEEP:-2}"
+
+# --- Systemd retry budget (GAP-014 cold-boot AppArmor race) ---
+# systemd 254+ uses RestartSec + RestartSteps + RestartMaxDelaySec for
+# exponential backoff. RestartSteps=5, RestartMaxDelaySec=30s gives
+# intervals 5s, ~7s, ~10s, ~15s, ~21s, 30s, 30s, ... (cumulative ~88s by
+# step 5, which gives the ~25s AppArmor race multiple chances to settle per
+# digital-twin-findings.md §9).
+readonly START_LIMIT_BURST_DEFAULT=8
+readonly RESTART_SEC_DEFAULT=5
+readonly RESTART_STEPS_DEFAULT=5
+readonly RESTART_MAX_DELAY_SEC_DEFAULT=30
+readonly START_LIMIT_INTERVAL_SEC_DEFAULT=180  # must exceed 8 * RestartMaxDelaySec = 240s; 180s gives 4x margin
+readonly START_LIMIT_BURST="${START_LIMIT_BURST:-$START_LIMIT_BURST_DEFAULT}"
+readonly RESTART_SEC="${RESTART_SEC:-$RESTART_SEC_DEFAULT}"
+readonly RESTART_STEPS="${RESTART_STEPS:-$RESTART_STEPS_DEFAULT}"
+readonly RESTART_MAX_DELAY_SEC="${RESTART_MAX_DELAY_SEC:-$RESTART_MAX_DELAY_SEC_DEFAULT}"
+readonly START_LIMIT_INTERVAL_SEC="${START_LIMIT_INTERVAL_SEC:-$START_LIMIT_INTERVAL_SEC_DEFAULT}"
 
 # --- XDG runtime dir base ---
 readonly XDG_RUNTIME_BASE="${XDG_RUNTIME_BASE:-/run/user}"
@@ -204,8 +224,7 @@ run_as_floci() {
 # identity/visibility mismatch — the file is owned by $FLOCI_USER and may not
 # be readable by root.
 #
-# %h and %t are Quadlet specifiers expanded at runtime by systemd — they must
-# appear literally in the file and must NOT be shell-expanded here.
+# %h and %t are Quadlet specifiers for the environment file and Podman socket.
 #
 # [Service] hardening is the maximal subset safe for a ROOTLESS user unit on
 # Ubuntu 26.04 with AppArmor userns restriction. The seccomp-based directives
@@ -246,8 +265,8 @@ write_quadlet_unit() {
 Description=Floci (AWS emulator) rootless container
 After=podman.socket
 Requires=podman.socket
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=${START_LIMIT_INTERVAL_SEC}
+StartLimitBurst=${START_LIMIT_BURST}
 
 [Container]
 Image=${FLOCI_IMAGE}
@@ -256,10 +275,10 @@ Network=${PODMAN_NETWORK}
 EnvironmentFile=%h/.config/floci/floci.env
 ${publish_ports}
 Volume=%t/podman/podman.sock:/var/run/docker.sock:z
-Volume=%h/floci-data:/app/data:z
+Volume=${FLOCI_HOST_PERSISTENT_PATH}:${FLOCI_STORAGE_PERSISTENT_PATH}:z
 # UserNS keep-id:uid=1001,gid=1001 — the Floci image runs as container uid
 # 1001 (gid 0); rootless Podman's default subuid mapping maps host floci
-# (1000) to container root (0), so a host bind mount of /home/floci/floci-data
+# (1000) to container root (0), so a host bind mount of the data directory
 # is root-owned inside the container and the container's floci user (1001)
 # cannot write to /app/data (java.nio.file.AccessDeniedException: /app/data/tls).
 # keep-id:uid=1001,gid=1001 maps host floci (1000) to container floci (1001),
@@ -273,7 +292,9 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 Restart=on-failure
-RestartSec=5
+RestartSec=${RESTART_SEC}
+RestartSteps=${RESTART_STEPS}
+RestartMaxDelaySec=${RESTART_MAX_DELAY_SEC}
 
 [Install]
 WantedBy=default.target
@@ -690,8 +711,8 @@ pull_floci_image() {
 # floci, mode 0700. Idempotent: mkdir -p is a no-op if the dir already
 # exists, and re-applying chmod 0700 is harmless.
 create_data_directory() {
-  run_as_floci mkdir -p "$FLOCI_DATA_DIR"
-  run_as_floci chmod 0700 "$FLOCI_DATA_DIR"
+  run_as_floci mkdir -p "$FLOCI_HOST_PERSISTENT_PATH"
+  run_as_floci chmod 0700 "$FLOCI_HOST_PERSISTENT_PATH"
 }
 
 # add_hosts_entry: ensure $HOSTS_FILE contains "127.0.0.1 $FLOCI_HOSTNAME"
