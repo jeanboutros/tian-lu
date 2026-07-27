@@ -149,7 +149,7 @@ ensure_twin() {
   fi
 
   if twin_exists; then
-    limactl start --tty=false "$TWIN_NAME" || {
+    limactl --tty=false start "$TWIN_NAME" || {
       FAIL_REASON='failed to start existing twin'
       return 1
     }
@@ -157,7 +157,7 @@ ensure_twin() {
     # Lima 2.x: create+start in one step with --name=<instance> <template>.
     # Override the repo mount location via a yq expression — there is no
     # builtin template variable for an arbitrary host path.
-    limactl start --tty=false --name="$TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" "$TWIN_TEMPLATE" || {
+    limactl --tty=false start --name="$TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" "$TWIN_TEMPLATE" || {
       FAIL_REASON='failed to create and start twin'
       return 1
     }
@@ -357,7 +357,7 @@ run_reboot_test() {
     FAIL_REASON='failed to stop twin for reboot test'
     return 1
   }
-  limactl start --tty=false "$TWIN_NAME" || {
+  limactl --tty=false start "$TWIN_NAME" || {
     FAIL_REASON='failed to restart twin for reboot test'
     return 1
   }
