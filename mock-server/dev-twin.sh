@@ -15,12 +15,33 @@ readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_MARKER_END="# END tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_ENTRY="127.0.0.1 tianlu-floci"
 readonly DEV_HEALTH_URL="http://tianlu-floci:4566/_floci/init"
+# Health-check poll budget. The Running branch (service already up) needs only
+# a short window; the Stopped/resume branch reuses this budget but the resume
+# path can take much longer on a cold QEMU arm64 boot (see DEV_RESUME_HEALTH_*).
 readonly DEV_HEALTH_TRIES=60
 readonly DEV_HEALTH_SLEEP=2
 readonly DEV_START_BUDGET_FIRST=600
 readonly DEV_START_BUDGET_RESUME=120
 readonly DEV_STOP_BUDGET=30
 readonly DEV_POLL_INTERVAL=5
+
+# --- Resume-path budgets -----------------------------------------------------
+# On a Lima resume the floci user manager starts asynchronously after the
+# system reaches default.target (Lima's readiness probe only waits for the
+# SYSTEM default.target, not the user manager). Two budgets cover the resume
+# chain:
+#   1. DEV_USER_MANAGER_BUDGET  — wait for user@<uid>.service AND the floci
+#      user's default.target to be active (mirrors setup-floci.sh
+#      enable_lingering two-stage poll, §9.1).
+#   2. DEV_RESUME_HEALTH_TRIES  — health poll after the service is started.
+#      Lima's AppArmor boot-race (digital-twin-findings.md §9) can keep
+#      floci.service failing for 2-3 minutes post-resume before apparmor.service
+#      loads the newuidmap/newgidmap profiles; 300s matches the test twin's
+#      REBOOT_HEALTH_BUDGET (run-test.sh).
+readonly DEV_USER_MANAGER_TRIES="${DEV_USER_MANAGER_TRIES:-30}"
+readonly DEV_USER_MANAGER_SLEEP="${DEV_USER_MANAGER_SLEEP:-2}"
+readonly DEV_RESUME_HEALTH_TRIES="${DEV_RESUME_HEALTH_TRIES:-150}"
+readonly DEV_RESUME_HEALTH_SLEEP="${DEV_RESUME_HEALTH_SLEEP:-2}"
 
 assert_identity() {
   if [[ "${DEV_TWIN_NAME}" == "floci-twin" || "${DEV_DISK_NAME}" == "floci-twin-data" ]]; then
@@ -143,8 +164,22 @@ _write_hosts_file() {
   fi
 }
 
+# managed_hosts_add
+# Offer to add a managed `127.0.0.1 tianlu-floci` block to the host's /etc/hosts
+# so host-side tools can resolve the Floci hostname without --resolve overrides.
+# The entry is a convenience, NOT a requirement: the dev twin forwards port
+# 4566 to 127.0.0.1 and curl --resolve bypasses DNS, so Floci is reachable
+# without it. The function:
+#   1. Shows exactly what will be written and why.
+#   2. Asks for a yes/no confirmation (the sudo prompt is for the HOST admin
+#      password — /etc/hosts lives on the macOS host, not the VM).
+#   3. On yes, runs `sudo install` (which prompts for the host password).
+#   4. On no, skips and records that the user should add it manually; the
+#      next-steps block printed at the end of dev_up includes the exact line.
+# Idempotent: if the managed block is already present and correct, returns 0
+# without prompting. Tests override DEV_HOSTS_FILE to a temp path to avoid sudo.
 managed_hosts_add() {
-  local hosts_file="${DEV_HOSTS_FILE:-/etc/hosts}" current new_content tmpfile
+  local hosts_file="${DEV_HOSTS_FILE:-/etc/hosts}" current new_content tmpfile answer
   _validate_hosts_markers "$hosts_file"
   current="$(cat "$hosts_file" 2>/dev/null || true)"
   new_content="$(printf '%s\n' "$current" | awk \
@@ -163,7 +198,41 @@ managed_hosts_add() {
     rm -f "$tmpfile"
     return 0
   fi
-  _write_hosts_file "$tmpfile" "$hosts_file"
+  if [[ "$hosts_file" != "/etc/hosts" ]]; then
+    _write_hosts_file "$tmpfile" "$hosts_file"
+    rm -f "$tmpfile"
+    return 0
+  fi
+  printf '\n'
+  printf 'The dev twin wants to add the following managed block to your HOST\n'
+  printf '/etc/hosts so host-side tools can resolve "tianlu-floci" by name:\n'
+  printf '\n'
+  printf '  %s\n' "$DEV_HOSTS_MARKER_BEGIN"
+  printf '  %s\n' "$DEV_HOSTS_ENTRY"
+  printf '  %s\n' "$DEV_HOSTS_MARKER_END"
+  printf '\n'
+  printf 'This is a convenience, NOT a requirement — the dev twin already\n'
+  printf 'forwards port 4566 to 127.0.0.1 and curl --resolve bypasses DNS.\n'
+  printf 'Floci is reachable without this entry.\n'
+  printf '\n'
+  printf 'The sudo prompt (if any) asks for your MACOS HOST admin password\n'
+  printf '(the file lives on your Mac, not inside the VM).\n'
+  printf '\n'
+  printf 'Add the entry now? [y/N] '
+  read -r answer </dev/tty 2>/dev/null || answer=n
+  printf '\n'
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    if _write_hosts_file "$tmpfile" "$hosts_file"; then
+      printf 'Host entry added.\n'
+    else
+      printf 'WARNING: sudo failed — the entry was not written. See the\n' >&2
+      printf '         next-steps block below for the manual command.\n' >&2
+      DEV_HOSTS_SKIPPED=1
+    fi
+  else
+    printf 'Skipped. The manual command is in the next-steps block below.\n'
+    DEV_HOSTS_SKIPPED=1
+  fi
   rm -f "$tmpfile"
 }
 
@@ -245,6 +314,105 @@ _health_check() {
   return 1
 }
 
+# _guest_floci_uid
+# Resolve the floci user's uid inside the guest. Returns empty on failure
+# (the caller treats empty as "user not found" and aborts).
+_guest_floci_uid() {
+  limactl shell "$DEV_TWIN_NAME" -- bash -c 'id -u floci 2>/dev/null' 2>/dev/null
+}
+
+# _run_as_floci_guest <cmd...>
+# Run a command as the floci user inside the guest with the user manager
+# environment wired (HOME, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS). stderr
+# is suppressed per the AGENTS.md limactl-shell convention (Lima login shell
+# cd-noise). The exit code of the inner command propagates through limactl.
+_run_as_floci_guest() {
+  local uid
+  uid="$(_guest_floci_uid)"
+  [[ -n "$uid" ]] || return 1
+  limactl shell "$DEV_TWIN_NAME" -- bash -c \
+    "sudo -u floci env HOME=/home/floci USER=floci PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus $*" 2>/dev/null
+}
+
+# _wait_user_manager
+# Wait for the floci user's systemd --user manager to be ready before issuing
+# any systemctl --user command. Mirrors the installer's two-stage poll
+# (setup-floci.sh enable_lingering, §9.1):
+#   stage 1 — system user manager unit user@<uid>.service is active
+#   stage 2 — the floci user's default.target is active
+# Lima's readiness probe (floci-dev.yaml) only waits for the SYSTEM
+# default.target; the user manager starts asynchronously via loginctl linger,
+# so without this poll a resume-path systemctl --user call races the user
+# manager and either aborts (bus socket absent) or fires before default.target.
+_wait_user_manager() {
+  local uid i
+  uid="$(_guest_floci_uid)"
+  if [[ -z "$uid" ]]; then
+    printf 'ERROR: user-manager: floci user not found in guest\n' >&2
+    return 1
+  fi
+  for ((i = 0; i < DEV_USER_MANAGER_TRIES; i++)); do
+    if limactl shell "$DEV_TWIN_NAME" -- bash -c \
+        "systemctl is-active --quiet user@${uid}.service 2>/dev/null \
+         && sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus \
+              systemctl --user is-active --quiet default.target 2>/dev/null" 2>/dev/null; then
+      return 0
+    fi
+    sleep "$DEV_USER_MANAGER_SLEEP"
+  done
+  printf 'ERROR: user-manager: floci user manager did not reach default.target\n' >&2
+  return 1
+}
+
+# _floci_service_state
+# Print the floci.service unit state as seen by the floci user manager:
+#   active | inactive | failed | activating | unknown
+# "unknown" is returned when the user manager cannot be reached (bus missing)
+# so the caller can distinguish "not started" from "cannot query".
+_floci_service_state() {
+  local state
+  state="$(_run_as_floci_guest 'systemctl --user is-active floci.service 2>/dev/null' || true)"
+  case "$state" in
+    active|inactive|failed|activating) printf '%s\n' "$state" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# _reset_floci_service
+# Clear a failed / start-limit-hit floci.service and any stale container so a
+# fresh start can succeed. On a Lima resume the AppArmor boot-race
+# (digital-twin-findings.md §9) can exhaust StartLimitBurst before
+# apparmor.service loads the newuidmap/newgidmap profiles; once AppArmor
+# settles, this reset + container removal lets the service start cleanly.
+# Mirrors the test twin's wait_for_reboot_health fallback (run-test.sh).
+_reset_floci_service() {
+  _run_as_floci_guest 'systemctl --user reset-failed floci.service 2>/dev/null || true' || true
+  _run_as_floci_guest 'podman rm -f tianlu-floci 2>/dev/null || true' || true
+}
+
+# _ensure_service
+# State-aware replacement for the old _start_service. Idempotent:
+#   active   -> nothing to do
+#   failed   -> reset + remove stale container, then start
+#   other    -> start
+# Always returns the exit code of the final systemctl start (or 0 when the
+# service was already active). Never silently swallows a start failure: a
+# non-zero return propagates to dev_up under set -e.
+_ensure_service() {
+  local state
+  state="$(_floci_service_state)"
+  case "$state" in
+    active)
+      return 0
+      ;;
+    failed)
+      _reset_floci_service
+      ;;
+  esac
+  _run_as_floci_guest 'systemctl --user start floci.service'
+}
+
 assert_preconditions() {
   local arch version major
   arch="$(uname -m)"
@@ -280,12 +448,6 @@ _install_exec_condition() {
   limactl shell "$DEV_TWIN_NAME" -- bash -c 'sudo chmod 644 /tmp/mount-condition.conf' 2>/dev/null
   limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus bash -c 'mkdir -p /home/floci/.config/systemd/user/floci.service.d && cp /tmp/mount-condition.conf /home/floci/.config/systemd/user/floci.service.d/mount-condition.conf && systemctl --user daemon-reload'" 2>/dev/null
   rm -f "$tmpfile"
-}
-
-_start_service() {
-  local uid
-  uid="$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'id -u floci 2>/dev/null' 2>/dev/null)"
-  limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user start floci.service" 2>/dev/null
 }
 
 _guest_ufw_baseline() {
@@ -326,6 +488,99 @@ _install_absent() {
   dev_env
 }
 
+# _resume_health_check
+# Resume-path health poll with an AppArmor boot-race fallback. The resume
+# chain on a cold QEMU arm64 boot can exceed the simple _health_check budget
+# because:
+#   - the floci user manager starts asynchronously after system default.target
+#   - Lima's AppArmor boot-race (digital-twin-findings.md §9) can keep
+#     floci.service failing for 2-3 minutes before apparmor.service loads the
+#     newuidmap/newgidmap profiles
+# Polls HTTP for DEV_RESUME_HEALTH_TRIES. If the service enters a failed
+# state during the poll (StartLimitBurst exhausted), reset it once and
+# re-poll — mirroring the test twin's wait_for_reboot_health fallback
+# (run-test.sh). Returns 0 on the first HTTP 200, 1 on exhaustion.
+_resume_health_check() {
+  local i code state
+  for ((i = 0; i < DEV_RESUME_HEALTH_TRIES; i++)); do
+    code="$(curl -s --connect-timeout 10 --max-time 15 --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo "000")"
+    if [[ "$code" == "200" ]]; then
+      return 0
+    fi
+    # If the service has hit the start limit, reset once and restart, then
+    # keep polling for the remainder of the budget.
+    state="$(_floci_service_state)"
+    if [[ "$state" == "failed" ]]; then
+      _reset_floci_service
+      _run_as_floci_guest 'systemctl --user start floci.service' || true
+    fi
+    sleep "$DEV_RESUME_HEALTH_SLEEP"
+  done
+  printf 'ERROR: health: Floci did not return HTTP 200 after resume\n' >&2
+  return 1
+}
+
+# _print_next_steps
+# Print a next-steps block after a successful dev_up: how to set AWS env vars,
+# connect to the VM, check the Floci service, view logs, and (if the user
+# declined the /etc/hosts prompt) the manual command to add the entry later.
+# All commands are host-side (run on the macOS host, not inside the VM).
+# shellcheck disable=SC2016
+_print_next_steps() {
+  printf '\n'
+  printf '================================================================\n'
+  printf ' Next steps\n'
+  printf '================================================================\n'
+  printf '\n'
+  printf '1. AWS CLI — set environment variables for this shell:\n'
+  printf '\n'
+  printf '      eval "$(make dev-env -- --export)"\n'
+  printf '\n'
+  printf '   This exports AWS_PROFILE=floci-dev, AWS_ENDPOINT_URL, and\n'
+  printf '   AWS_DEFAULT_REGION. The floci-dev profile + credentials were\n'
+  printf '   written to ~/.aws/config and ~/.aws/credentials.\n'
+  printf '\n'
+  printf '2. Floci endpoint:\n'
+  printf '\n'
+  printf '      http://localhost:4566   (port forwarded from the VM)\n'
+  printf '\n'
+  if [[ "${DEV_HOSTS_SKIPPED:-0}" == "1" ]]; then
+    printf '   You skipped the /etc/hosts entry. To add it later, run:\n'
+    printf '\n'
+    printf '      sudo bash -c '\''echo "%s" >> /etc/hosts'\''\n' "$DEV_HOSTS_ENTRY"
+    printf '\n'
+    printf '   Then http://tianlu-floci:4566 will also resolve on the host.\n'
+    printf '   Without it, use http://localhost:4566 or curl --resolve.\n'
+  else
+    printf '   http://tianlu-floci:4566 also resolves (host entry added).\n'
+  fi
+  printf '\n'
+  printf '3. Check status:\n'
+  printf '\n'
+  printf '      make dev-status\n'
+  printf '\n'
+  printf '   Shows instance state, disk, floci.service active/inactive, health.\n'
+  printf '\n'
+  printf '4. Shell into the VM:\n'
+  printf '\n'
+  printf '      make dev-shell\n'
+  printf '\n'
+  printf '5. Floci service logs (inside the VM):\n'
+  printf '\n'
+  printf '      make dev-shell\n'
+  printf '      sudo -u floci XDG_RUNTIME_DIR=/run/user/$(id -u floci) \\\n'
+  printf '        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u floci)/bus \\\n'
+  printf '        journalctl --user -u floci.service -f\n'
+  printf '\n'
+  printf '6. Stop / restart the dev twin:\n'
+  printf '\n'
+  printf '      make dev-down      # stop the VM (state is preserved)\n'
+  printf '      make dev-up         # resume (no reinstall)\n'
+  printf '      make dev-recreate    # rebuild OS from checkout, keep data disk\n'
+  printf '      make dev-reset       # destroy everything (VM + disk + hosts)\n'
+  printf '\n'
+}
+
 dev_up() {
   assert_identity
   assert_preconditions
@@ -335,18 +590,26 @@ dev_up() {
     Running)
       managed_hosts_add
       _health_check
+      _print_next_steps
       ;;
     Stopped)
       preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
       limactl start --tty=false "$DEV_TWIN_NAME"
       _wait_running "$DEV_START_BUDGET_RESUME"
       verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
-      _start_service
+      # Wait for the floci user manager before any systemctl --user call;
+      # then bring the service up (resetting a failed unit if the AppArmor
+      # boot-race exhausted StartLimitBurst) and poll health with the
+      # longer resume budget + fallback.
+      _wait_user_manager
+      _ensure_service
       managed_hosts_add
-      _health_check
+      _resume_health_check
+      _print_next_steps
       ;;
     absent)
       _install_absent
+      _print_next_steps
       ;;
     *)
       printf 'ERROR: dev-up: instance is in state %s — run make dev-recreate or make dev-reset\n' "$state" >&2

@@ -300,6 +300,23 @@ _stat_mode() {
   grep -q '^FLOCI_DOCKER_LOG_MAX_FILE=3$' "$FLOCI_ENV_FILE"
 }
 
+@test "write_env_file: FLOCI_BASE_URL uses http when FLOCI_TLS_ENABLED=false" {
+  run _run_fn \
+    "export STUB_OUT_OPENSSL='deadbeefcafe'; export FLOCI_TLS_ENABLED=false" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_BASE_URL=http://tianlu-floci:4566$' "$FLOCI_ENV_FILE"
+  ! grep -q '^FLOCI_BASE_URL=https://' "$FLOCI_ENV_FILE"
+}
+
+@test "write_env_file: explicit FLOCI_BASE_URL override wins over TLS-derived default" {
+  run _run_fn \
+    "export STUB_OUT_OPENSSL='deadbeefcafe'; export FLOCI_TLS_ENABLED=false; export FLOCI_BASE_URL=https://custom.example:8443" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_BASE_URL=https://custom.example:8443$' "$FLOCI_ENV_FILE"
+}
+
 @test "write_env_file: FLOCI_DOCKER_DOCKER_HOST is absent" {
   run _run_fn \
     "export STUB_OUT_OPENSSL='deadbeefcafe'" \

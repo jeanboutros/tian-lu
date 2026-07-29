@@ -194,6 +194,15 @@ export STUB_OUT_UFW='${ufw_out}'"
   grep -qF "https://tianlu-floci:4566/_floci/init" "$STUB_LOG"
 }
 
+@test "verify_health: uses http:// and omits -k when FLOCI_TLS_ENABLED=false" {
+  run _run_fn "export STUB_OUT_CURL=200; export FLOCI_TLS_ENABLED=false" "verify_health"
+  [ "$status" -eq 0 ]
+  grep -qF "http://tianlu-floci:4566/_floci/init" "$STUB_LOG"
+  ! grep -qF "https://tianlu-floci:4566/_floci/init" "$STUB_LOG"
+  # -k (insecure TLS) must not be passed when TLS is off
+  ! grep -qE '(^| )-k( |$)' "$STUB_LOG"
+}
+
 @test "verify_health: exits non-zero immediately on an error HTTP code" {
   run _run_fn "export STUB_OUT_CURL=503" "verify_health"
   [ "$status" -ne 0 ]
@@ -228,4 +237,15 @@ export STUB_OUT_UFW='${ufw_out}'"
   [[ "$output" == *"rfc1918"* ]]
   [[ "$output" == *"UNAUTHENTICATED"* || "$output" == *"RISK"* || "$output" == *"risk"* ]]
   [[ "$output" == *"https://tianlu-floci:4566"* ]]
+  [[ "$output" == *"self-signed"* ]]
+}
+
+@test "print_summary: prints http URL and TLS-disabled warning when FLOCI_TLS_ENABLED=false" {
+  run _run_fn \
+    "export FIREWALL_SCOPE=rfc1918; export FLOCI_TLS_ENABLED=false" \
+    "UFW_TRUSTED_SUBNETS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16); print_summary"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"http://tianlu-floci:4566"* ]]
+  [[ "$output" != *"https://tianlu-floci:4566"* ]]
+  [[ "$output" == *"TLS is disabled"* ]]
 }

@@ -166,6 +166,30 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   [[ "$output" == *"malformed"* ]]
 }
 
+@test "_print_next_steps includes manual hosts command when DEV_HOSTS_SKIPPED=1" {
+  run bash -c "
+    source '$DEV_SCRIPT'
+    DEV_HOSTS_SKIPPED=1 _print_next_steps
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Next steps"* ]]
+  [[ "$output" == *"eval \"\$(make dev-env -- --export)\""* ]]
+  [[ "$output" == *"make dev-status"* ]]
+  [[ "$output" == *"make dev-shell"* ]]
+  [[ "$output" == *"make dev-down"* ]]
+  [[ "$output" == *"127.0.0.1 tianlu-floci"* ]]
+}
+
+@test "_print_next_steps omits manual command when DEV_HOSTS_SKIPPED is unset" {
+  run bash -c "
+    source '$DEV_SCRIPT'
+    _print_next_steps
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Next steps"* ]]
+  [[ "$output" != *"You skipped"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # confirm_reset
 # ---------------------------------------------------------------------------
@@ -232,6 +256,8 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
     export STUB_OUT_CURL='200'
     source '$DEV_SCRIPT'
     assert_preconditions() { :; }
+    managed_hosts_add() { :; }
+    _print_next_steps() { :; }
     dev_up 2>&1
   "
   [ "$status" -eq 0 ]
@@ -247,16 +273,88 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
     export STUB_OUT_CURL='200'
     export DEV_START_BUDGET_RESUME=1
     export DEV_HEALTH_TRIES=1
+    export DEV_RESUME_HEALTH_TRIES=1
+    export DEV_USER_MANAGER_TRIES=1
     source '$DEV_SCRIPT'
     assert_preconditions() { :; }
     dev_instance_state() { printf 'Stopped\\n'; }
     verify_disk_mount() { return 0; }
-    _start_service() { :; }
+    _wait_user_manager() { :; }
+    _ensure_service() { :; }
+    managed_hosts_add() { :; }
+    _print_next_steps() { :; }
     dev_up 2>&1
   "
   [ "$status" -eq 0 ]
   grep -q 'limactl start --tty=false floci-dev' "$STUB_LOG"
   ! grep -q 'setup-floci.sh' "$STUB_LOG"
+}
+
+@test "dev_up Stopped path: _ensure_service called after _wait_user_manager" {
+  STUB_LOG="${STUB_LOG}" STUB_OUT_LIMACTL='floci-dev Running' STUB_OUT_CURL='200' \
+  DEV_START_BUDGET_RESUME=1 DEV_RESUME_HEALTH_TRIES=1 DEV_USER_MANAGER_TRIES=1 \
+  DEV_SCRIPT="$DEV_SCRIPT" \
+  run bash -c '
+    source "$DEV_SCRIPT"
+    assert_preconditions() { :; }
+    dev_instance_state() { printf "Stopped\n"; }
+    verify_disk_mount() { return 0; }
+    _wait_user_manager() { printf "WAIT_USER_MANAGER\n" >> "$STUB_LOG"; }
+    _ensure_service() { printf "ENSURE_SERVICE\n" >> "$STUB_LOG"; }
+    managed_hosts_add() { :; }
+    _print_next_steps() { :; }
+    dev_up 2>&1
+  '
+  [ "$status" -eq 0 ]
+  local wait_line ensure_line
+  wait_line=$(grep -n 'WAIT_USER_MANAGER' "$STUB_LOG" | head -1 | cut -d: -f1)
+  ensure_line=$(grep -n 'ENSURE_SERVICE' "$STUB_LOG" | head -1 | cut -d: -f1)
+  (( wait_line > 0 && ensure_line > wait_line ))
+}
+
+@test "_ensure_service resets failed state before starting" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    _floci_service_state() { printf 'failed\\n'; }
+    _reset_floci_service() { printf 'RESET\\n' >> '${STUB_LOG}'; }
+    _run_as_floci_guest() { printf 'RUN:%s\\n' \"\$1\" >> '${STUB_LOG}'; }
+    _ensure_service
+  "
+  [ "$status" -eq 0 ]
+  grep -q 'RESET' "$STUB_LOG"
+  grep -q 'RUN:systemctl --user start floci.service' "$STUB_LOG"
+}
+
+@test "_ensure_service no-op when service already active" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    _floci_service_state() { printf 'active\\n'; }
+    _reset_floci_service() { printf 'UNEXPECTED_RESET\\n' >> '${STUB_LOG}'; }
+    _run_as_floci_guest() { printf 'UNEXPECTED_START\\n' >> '${STUB_LOG}'; }
+    _ensure_service
+  "
+  [ "$status" -eq 0 ]
+  ! grep -q 'UNEXPECTED_RESET' "$STUB_LOG"
+  ! grep -q 'UNEXPECTED_START' "$STUB_LOG"
+}
+
+@test "_resume_health_check triggers reset-failed fallback on failed state" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    export STUB_OUT_CURL='000'
+    export DEV_RESUME_HEALTH_TRIES=2
+    export DEV_RESUME_HEALTH_SLEEP=0
+    source '$DEV_SCRIPT'
+    _floci_service_state() { printf 'failed\\n'; }
+    _reset_floci_service() { printf 'RESET\\n' >> '${STUB_LOG}'; }
+    _run_as_floci_guest() { printf 'START\\n' >> '${STUB_LOG}'; }
+    _resume_health_check 2>&1
+  "
+  [ "$status" -ne 0 ]
+  grep -q 'RESET' "$STUB_LOG"
+  grep -q 'START' "$STUB_LOG"
 }
 
 @test "dev_up Absent path: disk create before limactl start" {

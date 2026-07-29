@@ -49,7 +49,6 @@ readonly FLOCI_IMAGE="${FLOCI_IMAGE:-docker.io/floci/floci:1.5.33-compat}"
 
 # --- Floci configuration ---
 readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"
-readonly FLOCI_BASE_URL="${FLOCI_BASE_URL:-https://tianlu-floci:4566}"
 readonly FLOCI_API_PORT="${FLOCI_API_PORT:-4566}"
 readonly FLOCI_HEALTH_PATH="${FLOCI_HEALTH_PATH:-/_floci/init}"
 readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-1}"
@@ -59,6 +58,19 @@ readonly FLOCI_STORAGE_PERSISTENT_PATH="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/da
 FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOST_PERSISTENT_PATH:-${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}}"
 readonly FLOCI_TLS_ENABLED="${FLOCI_TLS_ENABLED:-true}"
 readonly FLOCI_TLS_SELF_SIGNED="${FLOCI_TLS_SELF_SIGNED:-true}"
+# FLOCI_BASE_URL scheme follows FLOCI_TLS_ENABLED so the URL written to the env
+# file and printed in the summary matches how Floci actually serves (TLS by
+# default; plain HTTP when the dev twin overrides FLOCI_TLS_ENABLED=false).
+# An explicit FLOCI_BASE_URL export always wins.
+if [[ -z "${FLOCI_BASE_URL:-}" ]]; then
+  if [[ "$FLOCI_TLS_ENABLED" == "true" ]]; then
+    readonly FLOCI_BASE_URL="https://${FLOCI_HOSTNAME}:${FLOCI_API_PORT}"
+  else
+    readonly FLOCI_BASE_URL="http://${FLOCI_HOSTNAME}:${FLOCI_API_PORT}"
+  fi
+else
+  readonly FLOCI_BASE_URL
+fi
 
 # --- Ports (container -p mappings) ---
 readonly FLOCI_PORTS_CONTAINER=(
@@ -891,13 +903,21 @@ configure_firewall() {
 # verify_health: poll the Floci health endpoint until it returns HTTP 200,
 # per §15.1. HTTP 200 = ready; 000 (connection refused/timeout) = not yet
 # started, retry; any other code = error, fail immediately.
+# The URL scheme follows FLOCI_TLS_ENABLED so the check stays correct whether
+# Floci serves TLS (production default) or plain HTTP (dev twin override).
 verify_health() {
-  local i code
+  local i code scheme curl_opts=()
+  if [[ "$FLOCI_TLS_ENABLED" == "true" ]]; then
+    scheme="https"
+    curl_opts+=(-k)
+  else
+    scheme="http"
+  fi
   for (( i=1; i<=HEALTH_POLL_TRIES; i++ )); do
     code="$(curl -s -o /dev/null -w '%{http_code}' \
       --resolve "${FLOCI_HOSTNAME}:${FLOCI_API_PORT}:127.0.0.1" \
       --connect-timeout 5 --max-time 10 \
-      -k "https://${FLOCI_HOSTNAME}:${FLOCI_API_PORT}${FLOCI_HEALTH_PATH}")" || code=000
+      "${curl_opts[@]+"${curl_opts[@]}"}" "${scheme}://${FLOCI_HOSTNAME}:${FLOCI_API_PORT}${FLOCI_HEALTH_PATH}")" || code=000
     case "$code" in
       200) return 0 ;;
       000) sleep "$HEALTH_POLL_SLEEP" ;;
@@ -929,8 +949,12 @@ print_summary() {
   echo "Only run this on a fully trusted network (see docs/design/solution-design.md §10.4)."
   echo
   echo "Connection URL: ${FLOCI_BASE_URL}"
-  echo "TLS is self-signed — clients must disable certificate verification"
-  echo "(e.g. AWS CLI/SDK: --no-verify-ssl / verify=False)."
+  if [[ "$FLOCI_TLS_ENABLED" == "true" ]]; then
+    echo "TLS is self-signed — clients must disable certificate verification"
+    echo "(e.g. AWS CLI/SDK: --no-verify-ssl / verify=False)."
+  else
+    echo "TLS is disabled — traffic is unencrypted. Do not use on an untrusted network."
+  fi
   echo
   echo "Data directory: ${FLOCI_DATA_DIR}"
   echo "Env file:       ${FLOCI_ENV_FILE}"
