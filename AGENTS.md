@@ -10,6 +10,7 @@ Infrastructure setup scripts for deploying Floci (AWS emulator) on Ubuntu Server
 - `REVIEW.md` — design rationale, challenger review findings, corrected configuration. **Read this before editing `setup-floci.sh`** — it explains why each config value is what it is.
 - `docs/design/` — design documents:
   - `solution-design.md` — full solution architecture for the Floci setup.
+  - `landing-zone-design.md` — architecture of the Terraform AWS landing zone that runs *on* Floci (IAM delegation, hub-and-spoke, centralized EKS/k3s, RDS, environment=account, `infra/` layout, deploy steps).
   - `dnsmasq-design.md` — LAN-wide DNS design for `tianlu-floci` → server IP (future stage).
   - `gaps-register.md` — unresolved items requiring runtime testing (open gaps remain; see this file for the current count).
   - `digital-twin-testing-design.md` — design for the Lima digital-twin VM harness that validates `setup-floci.sh` end-to-end.

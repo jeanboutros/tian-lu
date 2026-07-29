@@ -88,7 +88,7 @@ docs/learning/
 |---|---|---|---|
 | `learn-challenger` | raw question + repo context | sharpened problem statement, surfaced assumptions, 2–3 clarifying Qs, success criteria | read-only + web |
 | `learn-researcher` (×N, parameterized by lens) | sharpened problem + assigned lens | structured brief: claim · evidence+links · confidence · Floci caveats · "what would change my mind" | WebSearch, WebFetch, context7, AWS MCP docs, Read |
-| `learn-synthesizer` | all briefs + debate notes | recommendation · disagreement map · Floci adjustments · draft ADR + journal entry + findings | Read only (returns draft text; the command writes) |
+| `learn-synthesizer` | all briefs + debate notes | recommendation · disagreement map · Floci adjustments · draft ADR + journal entry + findings | Read/Write (drafts under `docs/learning/`) |
 
 ## Guardrails & error handling
 

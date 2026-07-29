@@ -1,0 +1,45 @@
+---
+title: Educational AWS landing-zone on Floci (centralized EKS, env = account = dev)
+---
+%% Green = REAL (enforced by Floci): k3s, Postgres, IAM, k8s NetworkPolicy (pod-to-pod).
+%% Grey dashed = METADATA / declarative intent only (NOT enforced by Floci): VPC, subnet, SG,
+%%   NAT, Transit Gateway. TGW is not even a Floci resource — it is modeled in Terraform locals.
+flowchart TB
+    dev(["Developer: kubectl / curl"])
+
+    subgraph ENV["Floci account = ENVIRONMENT = dev (one 12-digit AKID)"]
+        subgraph MGMT["Management / IAM layer — ENFORCED boundary"]
+            padmin["platform-admin (+ permission boundary)"]
+            roleA["role: app-alpha"]
+            roleB["role: app-beta"]
+            padmin -.->|"creates only WITH boundary"| roleA
+            padmin -.->|"creates only WITH boundary"| roleB
+        end
+        subgraph HUB["Network HUB VPC — network-only (metadata)"]
+            egress["NAT: centralized egress"]
+            tgw["Transit Gateway (Terraform locals, not a Floci resource)"]
+        end
+        subgraph CLUSTER["CLUSTER spoke VPC — shared EKS = real k3s"]
+            nsA["ns app-alpha: FastAPI pod, SA to roleA"]
+            netpol["NetworkPolicy / RBAC / Quota (k3s enforces pod-to-pod)"]
+        end
+        subgraph WSA["Workload spoke: Alpha VPC"]
+            rdsA["RDS Postgres Alpha (real container)"]
+        end
+        subgraph WSB["Workload spoke: Beta VPC — Phase 2"]
+            rdsB["RDS Postgres Beta + WAL (real container)"]
+        end
+    end
+
+    dev -->|"port-forward via k3s API"| nsA
+    nsA -->|"IAM DB auth (SigV4 token)"| rdsA
+    nsA -->|"spoke-to-spoke: IAM-gated (TGW intent modeled)"| rdsB
+    roleA -.->|"assumed via STS -> k8s Secret (IRSA stand-in)"| nsA
+    CLUSTER -.->|"TGW attach (intent)"| tgw
+    WSA -.->|"TGW attach (intent)"| tgw
+    WSB -.->|"TGW attach (intent)"| tgw
+
+    classDef real fill:#d6f5d6,stroke:#2e7d32,color:#111;
+    classDef meta fill:#eeeeee,stroke:#999,stroke-dasharray:4 3,color:#333;
+    class nsA,rdsA,rdsB,netpol real;
+    class egress,tgw meta;
