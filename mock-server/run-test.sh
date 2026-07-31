@@ -8,14 +8,16 @@ readonly TWIN_NAME="${TWIN_NAME:-floci-twin}"
 readonly TWIN_TEMPLATE="${TWIN_TEMPLATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lima/floci-twin.yaml}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
-HOST_HOME="${HOME:-$(id -un)}"
+HOST_HOME="${HOME:?HOME is not set — cannot determine host home directory}"
 readonly HOST_HOME
 readonly EVIDENCE_DIR_ROOT="${EVIDENCE_DIR_ROOT:-${HOST_HOME}/.cache/tianlu-twin/evidence}"
 FRESH=false
 KEEP=true
+KEEP_EXPLICIT=false
 DESTROY=false
 NO_SIDECAR=false
 REBOOT_TEST=false
+AUTH_MODE="off"
 EVIDENCE_DIR_OVERRIDE=""
 readonly SENTINEL_NAME="DONE"
 readonly MANIFEST_NAME="manifest.sha256"
@@ -33,8 +35,16 @@ FAIL_REASON=""
 
 # usage
 # Print the host orchestrator command-line interface.
+# --evidence-dir relocates the final host copy only; the 9p staging path
+# (/opt/twin-evidence in the guest, mounted from the host) is fixed because
+# it is declared in the Lima template (floci-twin.yaml).
 usage() {
-  printf 'Usage: %s [--fresh|--keep] [--destroy] [--no-sidecar] [--reboot-test] [--evidence-dir=<path>]\n' "${0##*/}"
+  printf 'Usage: %s [--fresh] [--keep] [--destroy] [--no-sidecar] [--reboot-test] [--auth-mode=off|sigv4] [--evidence-dir=<path>]\n' "${0##*/}"
+  printf '\n'
+  printf '  --fresh        Recreate the twin from scratch (implies --destroy).\n'
+  printf '  --keep         Keep the twin after the run (default).\n'
+  printf '  --destroy      Destroy the twin after the run.\n'
+  printf '  --fresh and --keep are mutually exclusive.\n'
 }
 
 # die
@@ -49,14 +59,15 @@ die() {
 assert_preconditions() {
   local lima_version macos_version macos_major
 
-  command -v limactl >/dev/null 2>&1 || die 'limactl not found (brew install lima)'
+  command -v limactl >/dev/null 2>&1 || { FAIL_REASON='limactl not found (brew install lima)'; return 1; }
   lima_version="$(limactl --version)"
   printf 'Using %s\n' "$lima_version"
-  [[ "$(uname -m)" == 'arm64' ]] || die 'twin requires Apple Silicon (arm64 host)'
+  [[ "$(uname -m)" == 'arm64' ]] || { FAIL_REASON='twin requires Apple Silicon (arm64 host)'; return 1; }
   macos_version="$(sw_vers -productVersion)"
   macos_major="${macos_version%%.*}"
   if [[ ! "$macos_major" =~ ^[0-9]+$ ]] || (( macos_major < 13 )); then
-    die 'qemu backend requires macOS 13+'
+    FAIL_REASON='qemu backend requires macOS 13+'
+    return 1
   fi
 }
 
@@ -68,13 +79,21 @@ parse_args() {
   for arg in "$@"; do
     case "$arg" in
       --fresh)
+        if [[ "$KEEP_EXPLICIT" == true ]]; then
+          FAIL_REASON='usage: --fresh and --keep are mutually exclusive'
+          return 1
+        fi
         FRESH=true
         KEEP=false
+        DESTROY=true
         ;;
       --keep)
-        if [[ "$FRESH" != true ]]; then
-          KEEP=true
+        if [[ "$FRESH" == true ]]; then
+          FAIL_REASON='usage: --fresh and --keep are mutually exclusive'
+          return 1
         fi
+        KEEP=true
+        KEEP_EXPLICIT=true
         ;;
       --destroy)
         DESTROY=true
@@ -84,6 +103,16 @@ parse_args() {
         ;;
       --reboot-test)
         REBOOT_TEST=true
+        ;;
+      --auth-mode=*)
+        AUTH_MODE="${arg#--auth-mode=}"
+        case "$AUTH_MODE" in
+          off|sigv4) ;;
+          *)
+            FAIL_REASON="usage: --auth-mode must be 'off' or 'sigv4' (got: ${AUTH_MODE})"
+            return 1
+            ;;
+        esac
         ;;
       --evidence-dir=*)
         EVIDENCE_DIR_OVERRIDE="${arg#--evidence-dir=}"
@@ -178,20 +207,25 @@ ensure_twin() {
     return 1
   }
   rm -rf "$STAGING"
-  rm -f "${HOST_EVIDENCE_MOUNT}/$SENTINEL_NAME" "${HOST_EVIDENCE_MOUNT}/FAILED"
 }
 
 # launch_driver
 # Start the guest driver in a transient unit so UFW cannot strand the test.
 launch_driver() {
   local -a driver_args=()
+  local driver_arg_str
 
   if [[ "$NO_SIDECAR" == true ]]; then
     driver_args+=(--no-sidecar)
   fi
+  if [[ "$AUTH_MODE" != "off" ]]; then
+    driver_args+=(--auth-mode="$AUTH_MODE")
+  fi
+  # ${arr[@]+...} guards the empty-array expansion under set -u (bash 3.2/macOS).
+  # printf '%q ' produces a single shell-escaped string safe for embedding in bash -c.
+  driver_arg_str=$(printf '%q ' ${driver_args[@]+"${driver_args[@]}"})
   (
-    # ${arr[@]+...} guards the empty-array expansion under set -u (bash 3.2/macOS).
-    limactl shell "$TWIN_NAME" -- bash -c "sudo systemd-run --quiet --wait --unit=tianlu-driver -- /opt/tianlu/mock-server/in-vm/run-in-vm.sh ${driver_args[*]+"${driver_args[*]}"}" 2>/dev/null
+    limactl shell "$TWIN_NAME" -- bash -c "sudo systemd-run --quiet --wait --unit=tianlu-driver -- /opt/tianlu/mock-server/in-vm/run-in-vm.sh ${driver_arg_str}" 2>/dev/null
   ) &
   DRIVER_SHELL_PID=$!
 }
@@ -224,14 +258,24 @@ poll_sentinel() {
 # wait_driver
 # Reap the driver transport and validate its exit status.
 # Must run before any reboot so limactl stop cannot kill the transport first.
+# Distinguishes four outcomes:
+#   0   — driver completed normally
+#   1   — driver exited with error (1-142)
+#   143 — driver killed after timeout (SIGTERM)
+#   empty PID — launch_driver may have failed (yields 127 from wait "")
 wait_driver() {
-  local status=0
-  wait "${DRIVER_SHELL_PID:-}" 2>/dev/null || status=$?
-  DRIVER_SHELL_PID=""
-  if [[ "$status" -ne 0 ]]; then
-    FAIL_REASON="driver exited nonzero (${status}) despite DONE"
+  local status
+  if [[ -z "${DRIVER_SHELL_PID:-}" ]]; then
+    FAIL_REASON="driver PID not set — launch_driver may have failed"
     return 1
   fi
+  wait "${DRIVER_SHELL_PID}" 2>/dev/null && status=$? || status=$?
+  DRIVER_SHELL_PID=""
+  case "$status" in
+    0)   return 0 ;;
+    143) FAIL_REASON="driver killed after timeout (SIGTERM)"; return 1 ;;
+    *)   FAIL_REASON="driver exited nonzero (${status})"; return 1 ;;
+  esac
 }
 
 # publish_evidence
@@ -345,7 +389,7 @@ wait_for_reboot_health() {
 # run_reboot_test
 # Prove Quadlet waits for podman.socket and starts Floci without re-installing.
 run_reboot_test() {
-  local run2_mtime_before run2_mtime_after health_result ordering_result journal_socket_line journal_service_line
+  local run2_mtime_before run2_mtime_after health_result ordering_result
 
   run2_mtime_before="$(file_mtime "$STAGING/run2.log")"
   if [[ "$run2_mtime_before" == '0' ]]; then
@@ -391,15 +435,11 @@ run_reboot_test() {
   fi
   # health is tracked via REBOOT_HEALTH_OUTCOME, not check_output
 
+  # Capture journal as evidence artifact (ordering is proven by After=/Requires= above).
   limactl shell "$TWIN_NAME" -- sudo bash -c '
     . /opt/tianlu/mock-server/in-vm/lib/assert.sh
     run_as_floci_guest journalctl --user -b -u podman.socket -u floci.service
   ' >"$STAGING/reboot-journal.log" 2>&1 || true
-  journal_socket_line="$(grep -n 'podman.socket' "$STAGING/reboot-journal.log" | sed -n '1p' || true)"
-  journal_service_line="$(grep -n 'floci.service' "$STAGING/reboot-journal.log" | sed -n '1p' || true)"
-  if [[ -z "$journal_socket_line" || -z "$journal_service_line" || ${journal_socket_line%%:*} -ge ${journal_service_line%%:*} ]]; then
-    ordering_result='FAIL'
-  fi
 
   # Atomically rewrite the reboot rows in staging summary.md
   local tmp_summary="${STAGING}/summary.md.tmp"
@@ -449,7 +489,8 @@ validate_summary() {
   fi
 
   local mandatory=(preflight-ok run1-exit-0 floci-service-active health-200 s3-smoke
-                   run2-exit-0 idempotency-hosts idempotency-subuid idempotency-hashes)
+                   run2-exit-0 idempotency-hosts idempotency-subuid idempotency-hashes
+                   sidecar-delta)
 
   # Parse table rows: | criterion | status |
   # bash 3.2 (macOS /bin/bash) has no associative arrays; use parallel indexed
@@ -536,8 +577,7 @@ main() {
     print_verdict "$result"
     return 1
   fi
-  assert_preconditions
-  if make_evidence_dir && ensure_twin && launch_driver && poll_sentinel; then
+  if assert_preconditions && make_evidence_dir && ensure_twin && launch_driver && poll_sentinel; then
     wait_driver || { print_verdict "$result"; teardown; return 1; }
     if [[ "$REBOOT_TEST" == true ]]; then
       run_reboot_test || reboot_ok=false

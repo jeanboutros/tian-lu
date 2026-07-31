@@ -97,7 +97,7 @@ First run takes ~10–15 min (boots Ubuntu VM + installs Floci). Subsequent star
 eval "$(make dev-env -- --export)"
 ```
 
-This sets `AWS_PROFILE=floci-dev`, `AWS_ENDPOINT_URL=https://tianlu-floci:4566`, and `AWS_DEFAULT_REGION=eu-west-1` in the current shell. A `floci-dev` profile is also written to `~/.aws/config` and `~/.aws/credentials` (dummy credentials — Floci accepts any non-empty values).
+This exports `AWS_PROFILE=ns-tianlu-floci-dev` plus `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` pointing at a project-local store under `~/.cache/tianlu-floci/aws` (your real `~/.aws` is left untouched). The profile carries the 12-digit account AKID, a generated secret (Floci ignores it today), region `eu-west-2`, and the Floci endpoint.
 
 ## To stop the dev environment (preserving all AWS data)
 

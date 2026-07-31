@@ -285,7 +285,7 @@ _stat_mode() {
 
   grep -q '^FLOCI_HOSTNAME=tianlu-floci$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_BASE_URL=https://tianlu-floci:4566$' "$FLOCI_ENV_FILE"
-  grep -q '^FLOCI_DEFAULT_REGION=eu-west-1$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_DEFAULT_REGION=eu-west-2$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_DEFAULT_ACCOUNT_ID=000000000000$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_STORAGE_MODE=persistent$' "$FLOCI_ENV_FILE"
   grep -q '^FLOCI_STORAGE_PERSISTENT_PATH=/app/data$' "$FLOCI_ENV_FILE"
@@ -363,4 +363,84 @@ _stat_mode() {
     "generate_presign_secret; write_env_file"
   [ "$status" -eq 0 ]
   [ -f "${FLOCI_ENV_FILE}.bak" ]
+}
+
+# ===========================================================================
+# Auth config block (CH-AUTH-002, CH-AUTH-003, M-25)
+# ===========================================================================
+
+@test "auth: FLOCI_AUTH_MODE=off + FLOCI_AUTH_VALIDATE_SIGNATURES=true → env file has false (hole closed)" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=off; export FLOCI_AUTH_VALIDATE_SIGNATURES=true; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_AUTH_VALIDATE_SIGNATURES=false$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=false$' "$FLOCI_ENV_FILE"
+}
+
+@test "auth: FLOCI_AUTH_MODE=sigv4 → all auth vars true" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=sigv4; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_AUTH_VALIDATE_SIGNATURES=true$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_SERVICES_IAM_ENABLED=true$' "$FLOCI_ENV_FILE"
+}
+
+@test "auth: FLOCI_AUTH_MODE=off → IAM enabled=true, enforcement=false" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=off; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_SERVICES_IAM_ENABLED=true$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_AUTH_VALIDATE_SIGNATURES=false$' "$FLOCI_ENV_FILE"
+  grep -q '^FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=false$' "$FLOCI_ENV_FILE"
+}
+
+@test "auth: FLOCI_AUTH_MODE=invalid → exits 1 with error message" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=invalid" \
+    "printf 'SHOULD_NOT_REACH'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FLOCI_AUTH_MODE must be"* ]]
+  [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "auth: FLOCI_AUTH_UNSAFE_OVERRIDE=1 + off mode + validate=true → validate=true (escape hatch works)" {
+  run _run_fn \
+    "export FLOCI_AUTH_UNSAFE_OVERRIDE=1; export FLOCI_AUTH_MODE=off; export FLOCI_AUTH_VALIDATE_SIGNATURES=true; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_AUTH_VALIDATE_SIGNATURES=true$' "$FLOCI_ENV_FILE"
+}
+
+@test "auth: FLOCI_AUTH_MODE is emitted to env file" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=sigv4; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_AUTH_MODE=sigv4$' "$FLOCI_ENV_FILE"
+
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=off; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_AUTH_MODE=off$' "$FLOCI_ENV_FILE"
+}
+
+@test "auth: SPEC-TX-006 case 3 — FLOCI_SERVICES_IAM_ENABLED=true in BOTH modes (M-25)" {
+  # sigv4 mode
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=sigv4; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_SERVICES_IAM_ENABLED=true$' "$FLOCI_ENV_FILE"
+
+  # off mode — IAM service is still enabled (only enforcement tracks the mode)
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=off; export STUB_OUT_OPENSSL='deadbeefcafe'" \
+    "generate_presign_secret; write_env_file"
+  [ "$status" -eq 0 ]
+  grep -q '^FLOCI_SERVICES_IAM_ENABLED=true$' "$FLOCI_ENV_FILE"
 }

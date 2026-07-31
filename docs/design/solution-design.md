@@ -127,7 +127,91 @@ The self-signed certificate provides encryption but no authentication — MITM i
 
 ## 8. Authentication
 
-`FLOCI_AUTH_VALIDATE_SIGNATURES` defaults to `false` — clients can use any access key ID (e.g. `test`) without valid SigV4 signatures. The script generates a random `FLOCI_AUTH_PRESIGN_SECRET` via `openssl rand -hex 32` and persists it. It is not regenerated on subsequent runs (that would invalidate existing pre-signed URLs).
+Authentication is controlled by a single `FLOCI_AUTH_MODE` parameter with two valid values:
+
+| Mode | Signatures | IAM Enforcement | Deployer Seeded | Use Case |
+|------|-----------|-----------------|-----------------|----------|
+| `sigv4` (default) | `true` | `true` | `true` | Production — SigV4 verification + IAM policy enforcement |
+| `off` | `false` | `false` | `false` | Trusted-LAN dev — no authentication |
+
+The `FLOCI_AUTH_MODE` parameter collapses three independent Floci toggles into two coherent states, preventing the dangerous `signatures=on, enforcement=off` combination (authenticates callers and then ignores their policies). See [`authentication-plan.md`](authentication-plan.md) for the full design.
+
+> **Known issue:** Floci `1.5.33-compat` does not actually verify SigV4 signatures even in `sigv4`
+> mode, so IAM is authored but not enforced at runtime. See
+> [`authentication-plan.md`](authentication-plan.md) §2 and
+> [`docs/issues/floci-signature-validation-ignored.md`](../issues/floci-signature-validation-ignored.md).
+
+### 8.1 IAM identity
+
+Each environment is a Floci account selected by a 12-digit Access Key ID. Deployment (Terraform + host
+CLI) authenticates as that account's **root** principal — Floci has no root credential, but a 12-digit
+AKID authenticates as `arn:aws:iam::<account>:root`.
+
+| Identity | Role |
+|----------|------|
+| Account root (12-digit AKID) | The deployment identity today; carries full admin in its account. |
+| `floci-deployer` IAM user | Seeded (`FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`) but **not used for deployment** — an IAM-user key resolves to the default account. Kept for the future, when Floci can authenticate a per-account IAM user. |
+| `platform-admin` + boundary | Authored by Terraform stage `10-management-iam` for real-AWS fidelity; not exercised on Floci (Terraform runs as account root). |
+
+See [`authentication-plan.md`](authentication-plan.md) §3 and
+[`landing-zone-design.md`](landing-zone-design.md) §5.
+
+### 8.2 Presign secret
+
+The script generates a random `FLOCI_AUTH_PRESIGN_SECRET` via `openssl rand -hex 32` and persists it. It is not regenerated on subsequent runs (that would invalidate existing pre-signed URLs).
+
+#### 8.2.1 Threat model
+
+`FLOCI_AUTH_PRESIGN_SECRET` mints presigned S3 URLs that **bypass the IAM layer entirely**.
+A presigned URL carries its own embedded signature — the caller does not need to authenticate
+with SigV4 or hold any IAM role. Anyone who possesses a valid presigned URL can perform the
+operation it encodes (GET, PUT, DELETE, etc.) on the target object, regardless of IAM policy.
+
+The Terraform state bucket is an S3 bucket on Floci. A presign capability over the state
+bucket is **equivalent to administrative access** to the entire landing zone:
+
+- **Read access** — an attacker with a presigned GET URL can read `terraform.tfstate`, which
+  contains all resource attributes including secrets, database endpoints, and IAM role ARNs.
+- **Write access** — an attacker with a presigned PUT URL can overwrite `terraform.tfstate`,
+  causing Terraform to plan against a corrupted state (resource drift, orphaned resources,
+  or injection of attacker-controlled attributes).
+- **Delete access** — an attacker with a presigned DELETE URL can remove the state object,
+  breaking Terraform's ability to manage the infrastructure.
+
+The presign secret is a **single key** that signs all presigned URLs for the Floci instance.
+There is no per-bucket or per-operation secret — one secret controls all presigned URLs
+across all S3 buckets.
+
+#### 8.2.2 Rotation path
+
+The presign secret is stored in the Floci env file (`~/.config/floci/floci.env`, mode 0600).
+To rotate it:
+
+1. Generate a new secret: `openssl rand -hex 32`
+2. Update `FLOCI_AUTH_PRESIGN_SECRET` in the env file
+3. Restart Floci: `systemctl --user restart floci.service`
+
+**Warning:** Rotating the presign secret invalidates **all** existing presigned URLs.
+Any in-flight presigned operations will fail with a signature mismatch. This includes
+any presigned URLs that Terraform or other tooling may have cached.
+
+#### 8.2.3 Reuse-if-exists behavior
+
+The installer's `generate_presign_secret` function is idempotent: if the env file already
+contains a `FLOCI_AUTH_PRESIGN_SECRET` value, it is preserved. The secret is only generated
+on the first install. This means:
+
+- **`make dev-recreate`** (rebuild OS, retain data disk) — the existing secret is reused.
+  Presigned URLs issued before the recreate remain valid.
+- **`make dev-reset`** (wipe all state) — a new secret is generated. All previously issued
+  presigned URLs are invalidated.
+- **Re-running the installer** on an existing deployment — the secret is preserved (idempotent).
+
+This behavior is intentional: regenerating the secret on every run would silently break
+any presigned URLs in use. The trade-off is that a compromised secret persists until
+explicitly rotated.
+
+### 8.3 Multi-account isolation
 
 Multi-account isolation is automatic via 12-digit numeric access key IDs — there is no config flag to enable it. When the AKID is exactly 12 digits, it is used as the account ID. Otherwise, `FLOCI_DEFAULT_ACCOUNT_ID` (`000000000000`) is the fallback.
 
@@ -232,7 +316,7 @@ Adding 5100-5199 to the Floci container's `-p` flags causes a port conflict with
 
 The script defaults to the server's auto-detected LAN `/24` subnet. `detect_hostname_and_ip` derives the server IP from the source address of the default route (`ip route get 1.1.1.1`, falling back to `hostname -I`), then zeroes the final octet to form the `/24`. An explicit `--firewall-scope=rfc1918` flag opens to all RFC1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) for operators who want broader access.
 
-With `FLOCI_AUTH_VALIDATE_SIGNATURES=false` (default) AND RFC1918 scope, any host in those ranges has full unauthenticated control of all Floci resources. This is acceptable only on a fully trusted single-tenant network with no guest WiFi, no VPN peers, and no IoT devices on the same subnet. `print_summary` prints the resolved scope and a risk statement on every run.
+Because Floci `1.5.33-compat` does not verify signatures (see [`authentication-plan.md`](authentication-plan.md) §2) even in the default `sigv4` mode, any host in the allowed scope effectively has full unauthenticated control of all Floci resources. This is acceptable only on a fully trusted single-tenant network with no guest WiFi, no VPN peers, and no IoT devices on the same subnet. `print_summary` prints the resolved scope and a risk statement on every run.
 
 If the server's IP changes (moved to a different network), the firewall rules become stale. Re-run the script to re-detect, or configure a static IP via `/etc/netplan/` to avoid this.
 
@@ -323,7 +407,7 @@ All Floci configuration is in `~/.config/floci/floci.env` (mode `0600`):
 ```ini
 FLOCI_HOSTNAME=tianlu-floci
 FLOCI_BASE_URL=https://tianlu-floci:4566
-FLOCI_DEFAULT_REGION=eu-west-1
+FLOCI_DEFAULT_REGION=eu-west-2
 FLOCI_DEFAULT_ACCOUNT_ID=000000000000
 FLOCI_STORAGE_MODE=persistent
 FLOCI_STORAGE_PERSISTENT_PATH=/app/data

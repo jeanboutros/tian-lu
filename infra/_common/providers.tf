@@ -7,8 +7,14 @@
 #   provider default_tags                 — https://registry.terraform.io/providers/hashicorp/aws/latest/docs#default_tags
 #   multi-account (12-digit AKID = account) — https://floci.io/floci/configuration/multi-account/
 
-variable "environment" { type = string } # dev | uat | prod  (AKID axis)
-variable "account_id" { type = string }  # 12-digit AKID; becomes the Floci account id
+variable "environment" {
+  type = string
+  validation {
+    condition     = contains(["dev", "test", "uat", "prod"], var.environment)
+    error_message = "environment must be one of dev, test, uat, prod (see landing-zone-design.md §4.1)."
+  }
+}
+variable "account_id" { type = string } # 12-digit AKID; becomes the Floci account id
 variable "secret_key" {
   type      = string
   sensitive = true
@@ -29,8 +35,10 @@ variable "default_tags" {
 provider "aws" {
   region = var.region
 
-  # In Floci, a 12-digit Access Key ID selects the account. The secret is not validated
-  # in dev, but signature *authorization* MUST be enabled (see scripts/preflight-floci.sh G1).
+  # A 12-digit Access Key ID selects the Floci account AND authenticates as that account's
+  # root principal (accepted limitation — see docs/design/authentication-plan.md).
+  # Floci 1.5.33-compat does not verify the secret (docs/issues/floci-signature-validation-ignored.md);
+  # secret_key is future-facing, not yet an enforced boundary.
   access_key = var.account_id
   secret_key = var.secret_key
 
@@ -42,12 +50,13 @@ provider "aws" {
   s3_use_path_style           = true
 
   # Mandatory governance tags on every taggable resource.
+  # var.default_tags is merged FIRST so governance keys CANNOT be overridden by tfvars.
   default_tags {
-    tags = merge({
+    tags = merge(var.default_tags, {
       Project     = "tianlu"
       Environment = var.environment
       ManagedBy   = "terraform"
-    }, var.default_tags)
+    })
   }
 
   # Point each service used by this estate at Floci's single port.
@@ -66,5 +75,16 @@ provider "aws" {
     logs           = var.floci_endpoint
     sns            = var.floci_endpoint
     sqs            = var.floci_endpoint
+  }
+}
+
+# The 12-digit AKID must resolve to the expected account. Fails the plan if it does not
+# (e.g. a non-12-digit key silently fell back to FLOCI_DEFAULT_ACCOUNT_ID).
+data "aws_caller_identity" "current" {
+  lifecycle {
+    postcondition {
+      condition     = self.account_id == var.account_id
+      error_message = "Resolved account ${self.account_id} does not match var.account_id ${var.account_id}: the AKID did not select the expected account."
+    }
   }
 }

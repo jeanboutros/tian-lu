@@ -7,8 +7,8 @@
 # Ref (accounts as the isolation axis): AWS Well-Architected SEC01
 #   https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/aws-account-management-and-separation.html
 
-environment    = "dev"
-account_id     = "111111111111" # dev AKID (uat=222222222222, prod=333333333333 — future)
+environment = "dev"
+account_id  = "111111111111" # dev AKID (uat=222222222222, prod=333333333333 — future)
 
 region         = "eu-west-2"
 floci_endpoint = "http://localhost:4566"
@@ -22,8 +22,9 @@ alpha_vpc_cidr   = "10.20.0.0/16" # App-Alpha workload spoke
 beta_vpc_cidr    = "10.30.0.0/16" # App-Beta workload spoke (Phase 2)
 
 default_tags = {
-  Owner   = "Jean Boutros"
-  Project     = "tianlu"
-  Environment = var.environment
-  ManagedBy   = "terraform"
+  Owner = "Jean Boutros"
+  # Project, Environment, and ManagedBy are injected by providers.tf's default_tags
+  # merge from var.environment. Do NOT duplicate them here — merge precedence means
+  # the providers.tf values silently override any duplicate keys in this map, with
+  # no diagnostic.
 }

@@ -27,7 +27,7 @@ every security decision below.
 
 | Concern | Mechanism | Status on Floci | Consequence for the design |
 | --- | --- | --- | --- |
-| API authorization | IAM / STS | **Enforced** (requires `FLOCI_AUTH_VALIDATE_SIGNATURES=true`) | IAM is the primary security boundary. |
+| API authorization | IAM / STS | **Target state — not enforced on Floci `1.5.33-compat`** (signatures are not verified; see [`authentication-plan.md`](authentication-plan.md) §2) | IAM is authored as the primary boundary; the trusted-network scope is the real control until the upstream fix lands. |
 | Kubernetes compute | EKS = real k3s | **Enforced** | Namespaces, RBAC, ResourceQuota, Pod Security Admission are real. |
 | Pod-to-pod traffic | Kubernetes NetworkPolicy | **Enforced** (k3s CNI) | Network isolation *inside* the cluster is real. |
 | Relational data | RDS = real PostgreSQL 16 | **Enforced** | Databases, WAL, and IAM DB authentication are real. |
@@ -107,7 +107,7 @@ infra/
 ├── _common/                       # shared, copied-per-stage templates (see §3.1)
 │   ├── versions.tf                # pinned Terraform core + provider versions
 │   ├── providers.tf               # AWS provider aimed at the Floci endpoint
-│   └── backend.hcl.example        # S3 remote-state backend configuration
+│   └── backend-<env>.hcl          # S3 remote-state backend config (one per environment)
 ├── environments/                  # one variable file per environment (= per account)
 │   └── dev.tfvars                 # dev AKID + non-overlapping VPC CIDRs + tags
 ├── modules/
@@ -126,6 +126,12 @@ apps/
 └── alpha-service/                 # FastAPI application source + Dockerfile (pushed to ECR)
 ```
 
+> **Implementation status:** Stage `00-backend-bootstrap` and stage `10-management-iam` are
+> implemented. Stages 20–60 (`20-network-hub`, `30-platform-eks`, `40-app-alpha`, `50-app-beta`,
+> `60-spoke-to-spoke`) are **planned** — their directory structure and design are documented here,
+> but the Terraform code has not yet been written. The present-tense descriptions in §3–§8 describe
+> the intended design, not the current implementation state.
+
 ### 3.1 Shared configuration (`_common/`)
 
 Terraform requires provider and version blocks in **every** root module, so shared configuration
@@ -139,8 +145,9 @@ symlinked) into each stage to keep pins and provider settings identical:
   mandatory `default_tags` (`Project`, `Environment`, `ManagedBy`), and enables the emulator
   conveniences (`skip_credentials_validation`, `skip_metadata_api_check`, `skip_region_validation`,
   `skip_requesting_account_id`, `s3_use_path_style`).
-- **`backend.hcl.example`** — the S3 backend definition (bucket, DynamoDB lock table, Floci endpoints).
-  The per-stage state `key` is supplied on the command line so the file stays generic.
+- **`backend-<env>.hcl`** — the S3 backend definition per environment (bucket, DynamoDB lock table,
+  Floci endpoints). The per-stage state `key` is supplied on the command line so the file stays
+  stage-generic.
 
 ### 3.2 Stage dependency graph
 
@@ -179,31 +186,37 @@ AKID axis to **environments**:
 | Environment | Account (AKID) | Status |
 | --- | --- | --- |
 | dev | `111111111111` | Built now |
-| uat | `222222222222` | Future |
-| prod | `333333333333` | Future |
+| test | `222222222222` | Future |
+| uat | `333333333333` | Future |
+| prod | `444444444444` | Future |
 
-Account isolation is automatic in Floci (multi-account is keyed on the AKID); there is no configuration
-flag to enable it. AWS Organizations and Service Control Policies are **not** emulated, so
-organization-level guardrails are documented rather than enforced.
+One Floci instance serves all four accounts: each request's 12-digit AKID selects the namespace.
+Account isolation is automatic (multi-account is keyed on the AKID); there is no flag to enable it.
+AWS Organizations and Service Control Policies are **not** emulated, so organization-level guardrails
+are documented rather than enforced.
 
 ### 4.2 Promotion model
 
-Because environment identity is a single variable, promoting from dev to uat/prod requires no code
+Because environment identity is a single variable, promoting across environments requires no code
 changes:
 
-1. Copy `environments/dev.tfvars` to `environments/uat.tfvars`.
-2. Change `account_id` to the new AKID (and adjust CIDRs if desired).
-3. Change the backend state `key` prefix (e.g. `uat/<stage>/terraform.tfstate`).
+1. Copy `environments/dev.tfvars` to `environments/<env>.tfvars` (test/uat/prod are already provided).
+2. Change `account_id` to the environment's AKID.
+3. Point the backend state `key` prefix at the environment (`infra/stage.sh` derives this).
 
-The **same stage code applies unchanged**. Account IDs are always resolved at runtime via
-`data.aws_caller_identity.current.account_id` and never hardcoded, so ARNs are correct in any account.
-In real AWS this pattern generalizes to a *function × environment* account grid; the stacks are
-parameterized so each stage could target a different account by swapping the provider AKID.
+The **same stage code applies unchanged**. `account_id` is supplied per environment through
+`var.account_id`; a `data.aws_caller_identity` postcondition in the provider verifies the AKID resolved
+to that account, so a mistyped credential fails the plan rather than provisioning into the wrong
+namespace.
 
 ## 5. IAM and roles
 
-Identity is the estate's primary, enforced security boundary. The IAM design implements delegated
-administration with a hard escalation ceiling, and one bounded role per application.
+Identity is the estate's primary security boundary. The IAM design implements delegated administration
+with a hard escalation ceiling and one bounded role per application. These controls are **authored for
+real-AWS fidelity but not exercised on Floci**: Terraform runs as account root (see
+[`authentication-plan.md`](authentication-plan.md) §3.2), and signatures are not verified on this build
+(§1.1), so on Floci they are modeled — like VPC / Transit Gateway — and become enforced on promotion to
+real AWS.
 
 ### 5.1 Delegated administration — `platform-admin`
 
@@ -251,6 +264,36 @@ injected into a Kubernetes Secret mounted by the pod.
 > (long-lived credential sprawl). In real EKS, IRSA or EKS Pod Identity must be used instead. The
 > `sts:AssumeRole` mechanics demonstrated here transfer directly to the real flow; when Floci adds
 > OIDC, the `workload-spoke` module migrates to native IRSA.
+
+The `sts:AssumeRole` call MUST include a `DurationSeconds` bound to limit the
+blast radius of a compromised Secret:
+
+```hcl
+# In the workload-spoke module's IAM role assumption:
+resource "aws_iam_role" "app" {
+  # ... role definition ...
+}
+
+# The deploy-time credential injection:
+# aws sts assume-role --role-arn <app-role-arn> --role-session-name <app>-pod \
+#   --duration-seconds 3600
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `DurationSeconds` | 3600 (1 hour) | Limits credential lifetime; matches the default AWS console session duration |
+| Re-assumption cadence | Every 30 minutes (half the session duration) | Ensures overlap — the new credential is valid before the old one expires |
+| Expiry behavior | Pod restarts if credentials expire | The sidecar/injector must exit non-zero when `sts:AssumeRole` fails, triggering a Kubernetes restart |
+
+The re-assumption cadence of half the session duration (30 minutes for a 1-hour
+session) follows the standard credential rotation pattern: refresh before expiry
+so there is always a valid credential. The injector sidecar (or init container)
+is responsible for this refresh loop.
+
+> **Note:** This is a Floci accommodation. In real EKS, IRSA or EKS Pod Identity
+> handles credential refresh automatically via the projected ServiceAccount token
+> volume. The `DurationSeconds` bound and re-assumption cadence documented here
+> are the manual equivalent of that automatic refresh.
 
 ## 6. Networking
 
@@ -380,14 +423,23 @@ falsifiable verification of the spoke-to-spoke control.
 ### 10.1 Prerequisites and pre-flight
 
 - A running Floci at `http://localhost:4566` (see [`solution-design.md`](solution-design.md)).
+- Floci configured with auth mode `sigv4` (`FLOCI_AUTH_VALIDATE_SIGNATURES=true` AND `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`). Note: this build does not actually verify signatures (see [`authentication-plan.md`](authentication-plan.md) §2), so IAM is authored but not yet enforced.
 - `terraform >= 1.9`, `aws` CLI v2, `kubectl`, `psql`, and `docker`/`podman`.
+- **Credentials** — export the environment's account-root credential before `terraform init`. The AKID
+  selects the account; the secret is the per-env generated secret (Floci ignores it today, see
+  [`authentication-plan.md`](authentication-plan.md) §2). For the dev twin:
+  ```bash
+  export AWS_ACCESS_KEY_ID="111111111111"                              # dev AKID
+  export AWS_SECRET_ACCESS_KEY="$(cat ~/.cache/tianlu-floci/dev/account.secret)"
+  export TF_VAR_secret_key="$AWS_SECRET_ACCESS_KEY"
+  ```
 - **Pre-flight gates** — because several controls are only enforced under the right Floci
   configuration, run [`scripts/preflight-floci.sh`](../../scripts/preflight-floci.sh) before any
   `terraform apply`. It asserts:
 
   | Gate | Assertion |
   | --- | --- |
-  | G1 | Signature authorization is ON (`FLOCI_AUTH_VALIDATE_SIGNATURES=true`) — a no-policy user is denied a privileged call. |
+  | G1 | Signature authorization AND IAM enforcement are ON (`FLOCI_AUTH_VALIDATE_SIGNATURES=true` AND `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`) — a no-policy user is denied a privileged call. |
   | G2 | RDS IAM database authentication actually rejects a fake token. |
   | G3 | DynamoDB conditional writes work (Terraform state locking). |
   | G4 | k3s NetworkPolicy scope is pod-to-pod (verified on a live cluster). |
@@ -408,11 +460,19 @@ terraform apply -var-file=../../environments/dev.tfvars
 ```
 
 Every subsequent stage initializes the shared S3 backend with a per-stage state key, then applies with
-the environment variable file:
+the environment variable file. The `infra/stage.sh` wrapper derives the backend config, state key, and
+var-file from the environment:
+
+```bash
+./infra/stage.sh init dev 20-network-hub
+./infra/stage.sh apply dev 20-network-hub
+```
+
+Or run Terraform directly:
 
 ```bash
 cd infra/live/20-network-hub
-terraform init -backend-config=../../_common/backend.hcl \
+terraform init -backend-config=../../_common/backend-dev.hcl \
                -backend-config="key=dev/20-network-hub/terraform.tfstate"
 terraform apply -var-file=../../environments/dev.tfvars
 ```
@@ -440,8 +500,11 @@ to `role-alpha` (§5.4).
 
 ## 12. Security model summary
 
-- **Primary boundary: IAM.** One bounded role per application; delegated administration cannot escalate
-  past the permissions boundary; database access is an IAM permission.
+- **Primary boundary: IAM (target state).** One bounded role per application; delegated administration
+  cannot escalate past the permissions boundary; database access is an IAM permission. On Floci
+  `1.5.33-compat` this is authored but not enforced (signatures are not verified — see
+  [`authentication-plan.md`](authentication-plan.md) §2); the trusted-network scope is the real control
+  until the upstream fix lands.
 - **Cluster boundary: namespaces + policy.** RBAC, ResourceQuota, Pod Security Admission, and
   default-deny NetworkPolicy provide soft multi-tenancy in the shared cluster.
 - **Network intent: modeled.** VPC/subnet/SG/TGW are authored as they would be in real AWS but are not
@@ -449,6 +512,11 @@ to `role-alpha` (§5.4).
 - **Data access: IAM DB auth.** Applications authenticate to PostgreSQL with SigV4 tokens tied to their
   role, not static passwords.
 - **Pre-flight gates** guarantee the platform actually enforces these controls before deployment.
+- **Presign secret risk:** `FLOCI_AUTH_PRESIGN_SECRET` mints presigned S3 URLs that bypass the IAM
+  layer entirely. A presign capability over the Terraform state bucket is equivalent to administrative
+  access — an attacker with a presigned URL can read, overwrite, or delete `terraform.tfstate`. See
+  [`solution-design.md` §8.2.1](solution-design.md) for the full threat model, rotation path, and
+  reuse-if-exists behavior.
 
 ## 13. Key design decisions
 

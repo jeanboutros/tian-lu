@@ -27,6 +27,7 @@ MOCK_SHELLS := mock-server/run-test.sh mock-server/in-vm/run-in-vm.sh mock-serve
 MOCK_SUDO := mock-server/tests/stubs/bin/sudo
 HOOK := scripts/pre-commit
 HELP_SCRIPT := scripts/help.sh
+INFRA_SHELLS := infra/stage.sh infra/scripts/help.sh
 TWIN_FLAGS ?= --fresh --reboot-test
 CI_TEST_IMAGES ?= ubuntu:24.04 ubuntu:26.04
 
@@ -36,8 +37,8 @@ help:
 	@./scripts/help.sh
 
 lint:
-	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK) $(HELP_SCRIPT)
-	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK) $(HELP_SCRIPT)
+	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK) $(HELP_SCRIPT) $(INFRA_SHELLS)
+	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK) $(HELP_SCRIPT) $(INFRA_SHELLS)
 
 test:
 	bats tests/

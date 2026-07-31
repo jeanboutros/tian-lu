@@ -22,7 +22,7 @@
 set -euo pipefail
 
 readonly ENDPOINT="${AWS_ENDPOINT_URL:-http://localhost:4566}"
-readonly REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+readonly REGION="${AWS_DEFAULT_REGION:-eu-west-2}"
 # A 12-digit access key id becomes the Floci account id (dev). See multi-account docs.
 readonly DEV_AKID="${DEV_AKID:-111111111111}"
 
@@ -32,7 +32,7 @@ skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 FAILED=0
 
-aws_admin() { AWS_ACCESS_KEY_ID="$DEV_AKID" AWS_SECRET_ACCESS_KEY=test aws --endpoint-url "$ENDPOINT" --region "$REGION" "$@"; }
+aws_admin() { AWS_ACCESS_KEY_ID="$DEV_AKID" AWS_SECRET_ACCESS_KEY="${FLOCI_ACCOUNT_SECRET:-test}" aws --endpoint-url "$ENDPOINT" --region "$REGION" "$@"; }
 
 # ---------------------------------------------------------------------------
 # G1 — signature / authorization validation must be ON
@@ -44,7 +44,7 @@ gate_g1_signatures() {
   local user="preflight-nopolicy-$$" ak sk out
   aws_admin iam create-user --user-name "$user" >/dev/null 2>&1 || true
   if ! out=$(aws_admin iam create-access-key --user-name "$user" 2>/dev/null); then
-    skip "could not create access key (is IAM up?) — verify manually"; return
+    fail "could not create access key (is IAM up?) — verify manually"; return
   fi
   ak=$(printf '%s' "$out" | grep -o '"AccessKeyId": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
   sk=$(printf '%s' "$out" | grep -o '"SecretAccessKey": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
@@ -68,7 +68,7 @@ gate_g3_dynamodb_lock() {
   aws_admin dynamodb create-table --table-name "$table" \
     --attribute-definitions AttributeName=LockID,AttributeType=S \
     --key-schema AttributeName=LockID,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST >/dev/null 2>&1 || { skip "could not create table (is DynamoDB up?)"; return; }
+    --billing-mode PAY_PER_REQUEST >/dev/null 2>&1 || { fail "could not create table (is DynamoDB up?)"; return; }
   aws_admin dynamodb put-item --table-name "$table" \
     --item '{"LockID":{"S":"x"}}' --condition-expression "attribute_not_exists(LockID)" >/dev/null 2>&1 || true
   if aws_admin dynamodb put-item --table-name "$table" \

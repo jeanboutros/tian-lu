@@ -225,19 +225,56 @@ export STUB_OUT_UFW='${ufw_out}'"
   [[ "$output" == *"timed out"* ]]
 }
 
+@test "verify_health: retries on 5xx and passes when 200 follows (M-28)" {
+  # Custom curl stub: returns 503 twice, then 200
+  local curl_stub="${TEST_TMP}/curl"
+  local count_file="${TEST_TMP}/curl-call-count"
+  cat > "$curl_stub" <<'STUB_EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$STUB_LOG"
+count=$(cat "${CURL_COUNT_FILE}" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%d' "$count" > "${CURL_COUNT_FILE}"
+if [[ $count -le 2 ]]; then
+  printf '503'
+  exit 0
+fi
+printf '200'
+exit 0
+STUB_EOF
+  chmod +x "$curl_stub"
+  rm -f "$count_file"
+
+  run _run_fn \
+    "export PATH='${TEST_TMP}:${PATH}'; export CURL_COUNT_FILE='${count_file}'; export HEALTH_POLL_TRIES=5; export HEALTH_POLL_SLEEP=0" \
+    "verify_health"
+  [ "$status" -eq 0 ]
+}
+
 # ===========================================================================
 # print_summary
 # ===========================================================================
 
-@test "print_summary: prints scope, an unauthenticated/risk statement, and the base URL" {
+@test "print_summary: off mode prints the UNAUTHENTICATED risk statement and the base URL" {
   run _run_fn \
-    "export FIREWALL_SCOPE=rfc1918" \
+    "export FLOCI_AUTH_MODE=off; export FIREWALL_SCOPE=rfc1918" \
     "UFW_TRUSTED_SUBNETS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16); print_summary"
   [ "$status" -eq 0 ]
   [[ "$output" == *"rfc1918"* ]]
-  [[ "$output" == *"UNAUTHENTICATED"* || "$output" == *"RISK"* || "$output" == *"risk"* ]]
+  [[ "$output" == *"UNAUTHENTICATED"* ]]
   [[ "$output" == *"https://tianlu-floci:4566"* ]]
   [[ "$output" == *"self-signed"* ]]
+}
+
+@test "print_summary: sigv4 mode prints the target-state note and the F-01 known-issue pointer" {
+  run _run_fn \
+    "export FLOCI_AUTH_MODE=sigv4; export FIREWALL_SCOPE=rfc1918" \
+    "UFW_TRUSTED_SUBNETS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16); print_summary"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sigv4"* ]]
+  [[ "$output" == *"KNOWN ISSUE"* ]]
+  [[ "$output" == *"docs/issues/floci-signature-validation-ignored.md"* ]]
+  [[ "$output" != *"UNAUTHENTICATED"* ]]
 }
 
 @test "print_summary: prints http URL and TLS-disabled warning when FLOCI_TLS_ENABLED=false" {

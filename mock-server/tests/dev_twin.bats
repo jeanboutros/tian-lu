@@ -484,27 +484,101 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
 }
 
 # ---------------------------------------------------------------------------
-# dev_env
+# dev_env — project-local AWS profile (Option C)
 # ---------------------------------------------------------------------------
-@test "dev_env --export prints export lines" {
+@test "dev_env --export prints Option C env vars" {
   run bash -c "
     export HOME='${TEST_TMP}'
     source '$DEV_SCRIPT'
     dev_env --export
   "
   [ "$status" -eq 0 ]
-  [[ "$output" == *"AWS_PROFILE=floci-dev"* ]]
-  [[ "$output" == *"AWS_ENDPOINT_URL"* ]]
+  [[ "$output" == *"AWS_PROFILE=ns-tianlu-floci-dev"* ]]
+  [[ "$output" == *"AWS_CONFIG_FILE="* ]]
+  [[ "$output" == *"AWS_SHARED_CREDENTIALS_FILE="* ]]
 }
 
-@test "dev_env creates aws config profile idempotently" {
+@test "dev_env writes account-root AKID + generated secret to the project-local store" {
   run bash -c "
     export HOME='${TEST_TMP}'
     source '$DEV_SCRIPT'
     dev_env --export >/dev/null
-    dev_env --export >/dev/null
-    grep -c '\\[profile floci-dev\\]' '${TEST_TMP}/.aws/config' | tail -1
   "
   [ "$status" -eq 0 ]
-  [ "$output" = "1" ]
+  local creds="${TEST_TMP}/.cache/tianlu-floci/aws/credentials"
+  local cfg="${TEST_TMP}/.cache/tianlu-floci/aws/config"
+  [ -f "$creds" ]
+  grep -qF '[ns-tianlu-floci-dev]' "$creds"
+  grep -qF 'aws_access_key_id = 111111111111' "$creds"
+  grep -qE 'aws_secret_access_key = [0-9a-f]{64}' "$creds"
+  grep -qF 'endpoint_url = http://tianlu-floci:4566' "$cfg"
+  # the host's real ~/.aws must be left untouched
+  [ ! -e "${TEST_TMP}/.aws/credentials" ]
+}
+
+# ---------------------------------------------------------------------------
+# _ensure_account_secret — per-env generated secret
+# ---------------------------------------------------------------------------
+@test "_ensure_account_secret generates a 0600 64-hex secret and reuses it" {
+  run bash -c "
+    export HOME='${TEST_TMP}'
+    source '$DEV_SCRIPT'
+    _ensure_account_secret
+    cat \"\$DEV_ACCOUNT_SECRET_FILE\"
+    _ensure_account_secret
+    cat \"\$DEV_ACCOUNT_SECRET_FILE\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" =~ ^[0-9a-f]{64}$ ]]
+  [ "${lines[0]}" = "${lines[1]}" ]
+  local secret_file="${TEST_TMP}/.cache/tianlu-floci/dev/account.secret"
+  local mode
+  mode="$(/usr/bin/stat -f '%Lp' "$secret_file" 2>/dev/null || /usr/bin/stat -c '%a' "$secret_file" 2>/dev/null)"
+  [ "$mode" = "600" ] || [ "$mode" = "0600" ]
+}
+
+@test "dev_env is idempotent — one profile block, secret reused across runs" {
+  run bash -c "
+    export HOME='${TEST_TMP}'
+    source '$DEV_SCRIPT'
+    dev_env --export >/dev/null
+    cp \"\$DEV_ACCOUNT_SECRET_FILE\" '${TEST_TMP}/secret1'
+    dev_env --export >/dev/null
+    cp \"\$DEV_ACCOUNT_SECRET_FILE\" '${TEST_TMP}/secret2'
+  "
+  [ "$status" -eq 0 ]
+  local creds="${TEST_TMP}/.cache/tianlu-floci/aws/credentials"
+  [ "$(grep -cF '[ns-tianlu-floci-dev]' "$creds")" -eq 1 ]
+  cmp -s "${TEST_TMP}/secret1" "${TEST_TMP}/secret2"
+}
+
+# ===========================================================================
+# _print_next_steps — auth posture
+# ===========================================================================
+@test "_print_next_steps prints the auth posture note in sigv4 mode" {
+  run env DEV_AUTH_MODE=sigv4 bash -c "
+    source '$DEV_SCRIPT'
+    _print_next_steps
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Next steps"* ]]
+  [[ "$output" == *"make dev-env"* ]]
+  [[ "$output" == *"Auth posture"* ]]
+  [[ "$output" == *"account-root"* ]]
+}
+
+# ===========================================================================
+# Unified health budget (M-29 / CH-DEV-005)
+# ===========================================================================
+
+@test "health budget: fresh-install health budget matches resume budget (M-29)" {
+  run bash -c "
+    source '$DEV_SCRIPT'
+    # Both _health_check (fresh-install) and _resume_health_check (resume)
+    # use the same DEV_RESUME_HEALTH_TRIES * DEV_RESUME_HEALTH_SLEEP budget.
+    health_budget=\$(( DEV_RESUME_HEALTH_TRIES * DEV_RESUME_HEALTH_SLEEP ))
+    printf '%s\n' \"\$health_budget\"
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "300" ]
 }

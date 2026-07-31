@@ -23,10 +23,12 @@ picture is [`docs/learning/diagrams/solution.mmd`](../docs/learning/diagrams/sol
 
 ## Prerequisites
 - Podman + a running Floci at `http://localhost:4566` (the repo's `setup-floci.sh` / Lima dev-twin).
-- `terraform >= 1.9`, `aws` CLI v2, `kubectl`, `psql`, `docker`/`podman`.
+- `terraform >= 1.15.8` (the pin in [`_common/versions.tf`](_common/versions.tf)), `aws` CLI v2,
+  `kubectl`, `psql`, `docker`/`podman`.
+- `TF_VAR_secret_key` exported — every stage declares `var.secret_key` as sensitive with no default.
 - **Run the pre-flight first** — it checks that Floci actually *enforces* what we teach:
   ```bash
-  ./scripts/preflight-floci.sh
+  make -C infra preflight     # or directly: ./scripts/preflight-floci.sh
   ```
   It must confirm **G1** signature authorization is ON (`FLOCI_AUTH_VALIDATE_SIGNATURES=true`),
   **G2** RDS IAM auth rejects a fake token, **G3** DynamoDB conditional-write locking works. Without
@@ -42,15 +44,24 @@ flowchart TB
     a -. Phase 2 .-> bt["50 app-beta (db-only spoke, WAL)"]
     bt --> s2s["60 spoke-to-spoke (IAM + NetworkPolicy)"]
 ```
-Apply a stage with the shared backend/vars:
+Apply a stage — `make` is the entry point (`make help` lists every target):
 ```bash
-cd infra/live/20-network-hub
-terraform init -backend-config=../../_common/backend.hcl \
-               -backend-config="key=dev/20-network-hub/terraform.tfstate"
-terraform apply -var-file=../../environments/dev.tfvars
+cd infra
+export TF_VAR_secret_key=floci          # or: source ~/.cache/tianlu-twin/dev-credentials.env
+make init  STAGE=20-network-hub          # syncs _common templates, wires the per-env backend
+make plan  STAGE=20-network-hub
+make apply STAGE=20-network-hub          # runs the G1/G3 pre-flight gate first
 ```
-> **Blast radius:** changing an upstream stage's outputs requires re-planning downstream stages. Apply
-> in topological order; a `make plan-all` target will enforce this.
+`ENV` defaults to `dev`; add `ENV=uat` for another account. `make plan-20-network-hub` is a shorthand.
+Under the hood `make` calls [`stage.sh`](stage.sh), which is the only place terraform is invoked — it
+derives `-backend-config=_common/backend-<env>.hcl`, the state key `<env>/<stage>/terraform.tfstate`,
+and `-var-file=environments/<env>.tfvars`, and special-cases `00-backend-bootstrap` (local state). Note
+`-backend-config` is an `init`-only flag; Terraform rejects it on `plan`/`apply`.
+
+> **Blast radius:** changing an upstream stage's outputs requires re-planning downstream stages, so apply
+> in topological order. `make plan-all` / `make apply-all` walk every stage in that order (`NN-` prefixes
+> sort topologically), and `make lint-infra` runs `fmt -check` + `validate` across the estate with no
+> credentials needed.
 
 ## How to access the application
 NodePort/LoadBalancer host-reachability is unverified on Floci (Finding 0003), so use the k3s API:

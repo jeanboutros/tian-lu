@@ -17,8 +17,10 @@ readonly HEALTH_URL="https://tianlu-floci:4566/_floci/init"
 readonly FLOCI_ENV_FILE="/home/floci/.config/floci/floci.env"
 readonly FLOCI_QUADLET_FILE="/home/floci/.config/containers/systemd/floci.container"
 NO_SIDECAR=false
+AUTH_MODE="off"
 EVIDENCE_STAGING=""
 EVENTS_PID=""
+aws_creds_env=()
 declare -A CRITERIA=(
   [preflight-ok]=FAIL
   [run1-exit-0]=FAIL
@@ -37,7 +39,7 @@ declare -A CRITERIA=(
 # usage
 # Print the accepted guest-driver arguments.
 usage() {
-  printf 'Usage: %s [--no-sidecar] [--evidence-dir=<path>]\n' "${0##*/}" >&2
+  printf 'Usage: %s [--no-sidecar] [--auth-mode=off|sigv4] [--evidence-dir=<path>]\n' "${0##*/}" >&2
 }
 
 # parse_args
@@ -48,6 +50,16 @@ parse_args() {
     case "$arg" in
       --no-sidecar)
         NO_SIDECAR=true
+        ;;
+      --auth-mode=*)
+        AUTH_MODE="${arg#--auth-mode=}"
+        case "$AUTH_MODE" in
+          off|sigv4) ;;
+          *)
+            FAIL_REASON="usage: --auth-mode must be 'off' or 'sigv4' (got: ${AUTH_MODE})"
+            return 1
+            ;;
+        esac
         ;;
       --evidence-dir=*)
         EVIDENCE_HOST_DIR="${arg#--evidence-dir=}"
@@ -191,9 +203,9 @@ step_run1() {
   log "GAP-009 body captured"
 
   sleep 5
-  run_as_floci_guest podman exec tianlu-floci aws --endpoint-url https://localhost:4566 --no-verify-ssl s3 mb s3://twin \
+  run_as_floci_guest podman exec ${aws_creds_env[@]+"${aws_creds_env[@]}"} tianlu-floci aws --endpoint-url https://localhost:4566 --no-verify-ssl s3 mb s3://twin \
     2>&1 | tee -a "$EVIDENCE_STAGING/s3-smoke.log" || true
-  buckets="$(run_as_floci_guest podman exec tianlu-floci aws --endpoint-url https://localhost:4566 --no-verify-ssl s3 ls \
+  buckets="$(run_as_floci_guest podman exec ${aws_creds_env[@]+"${aws_creds_env[@]}"} tianlu-floci aws --endpoint-url https://localhost:4566 --no-verify-ssl s3 ls \
     2>&1 | tee -a "$EVIDENCE_STAGING/s3-smoke.log")"
   assert_contains "twin" "$buckets" "s3-smoke"
   CRITERIA[s3-smoke]=PASS
@@ -217,7 +229,7 @@ step_sidecar() {
   EVENTS_PID=$!
 
   # shellcheck disable=SC2016
-  run_as_floci_guest podman exec tianlu-floci bash -c '
+  run_as_floci_guest podman exec ${aws_creds_env[@]+"${aws_creds_env[@]}"} tianlu-floci bash -c '
     set -e
     mkdir -p /tmp/lambda-test && cd /tmp/lambda-test
     printf "def handler(event, context):\n    return {\"ok\": True}\n" > handler.py
@@ -338,6 +350,11 @@ step_evidence() {
 # Run each guest-driver stage in order, leaving publication to the host wrapper.
 main() {
   parse_args "$@"
+  if [[ "$AUTH_MODE" == "sigv4" ]]; then
+    # Account-root identity (12-digit AKID). Floci ignores the secret today
+    # (docs/issues/floci-signature-validation-ignored.md); any non-empty value works.
+    aws_creds_env=(-e AWS_ACCESS_KEY_ID=111111111111 -e AWS_SECRET_ACCESS_KEY=test)
+  fi
   EVIDENCE_STAGING="${EVIDENCE_HOST_DIR}/staging"
   mkdir -p "$EVIDENCE_STAGING"
   trap 'on_fail' ERR

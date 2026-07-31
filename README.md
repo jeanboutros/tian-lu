@@ -1,26 +1,41 @@
-# Tianlu — Floci on Ubuntu Server with rootless Podman
+# Tianlu: Floci on Ubuntu Server with rootless Podman
 
-Tianlu is an **idempotent bash installer** (`setup-floci.sh`) that deploys
-[Floci](https://floci.io) — a local, self-hosted AWS emulator — onto an Ubuntu
-Server using **rootless Podman**. Run it once to stand up a hardened Floci
-service that survives reboots; re-run it any time to reconcile state.
+Tianlu is an idempotent bash installer (`setup-floci.sh`) that puts
+[Floci](https://floci.io), a local self-hosted AWS emulator, onto an Ubuntu
+server and runs it under rootless Podman.
 
-The pinned image is `docker.io/floci/floci:1.5.33-compat`. The *compat* variant bundles
-Python 3, the AWS CLI, and boto3, so the container can run initialization hooks
-and client tooling without extra installs.
+It pins the image `docker.io/floci/floci:1.5.33-compat`. The *compat* build ships
+Python 3, the AWS CLI, and boto3 inside the container, so it can run
+initialization hooks and client tooling without me installing anything extra.
 
-> This repository contains **infrastructure scripts and design documentation
-> only** — there is no application code. Floci itself ships as a container image.
+> There's no application code in here, just the installer and the design docs
+> behind it. Floci itself is the container image.
+
+## Raison d'être
+
+I just started my journey into AWS and wanted a **local sandbox** to learn and experiment without incurring costs or risking my real AWS account. My other two options were to request a sandbox account from my employer or to use my own AWS account, but both have drawbacks: the former is slow and bureaucratic, and the latter is risky and expensive. 
+
+While debating my options, the divine power of cookies and digital surveillance led me to discover Floci while scrolling on Instagram, and here I am, co-writing this README with a bunch of AI agents.
+
+As a start I wanted to install Floci on my own Ubuntu server, so I started with the setup-floci.sh script, then started writing the end-to-end tests, so it occurred to me that if I could run a full qemu VM on my mac for testing with systemd and quadlets, why not make that environment available for local development too? So I did.
+
+## Why two weeks for a two-minute install
+
+You can get Floci running in two minutes with a single command. I've spent two
+weeks on it. Not because I want to over-engineer a perishable dev environment,
+but because I appreciate good design, and I'd rather not leave the most important
+decisions for later just to start quickly. I wanted to see what a real
+production-grade setup looks like, or at least get a taste of it.
 
 ## Why rootless Podman
 
-Floci runs as a dedicated, unprivileged `floci` user. If the Floci container or
-any sidecar it spawns is compromised, the blast radius is confined to that
-user's UID namespace — there is no path to host root. See
-[`docs/design/solution-design.md`](docs/design/solution-design.md) §2 for the
-full rationale.
+Floci runs as its own unprivileged `floci` user. So if someone breaks into the
+Floci container, or into one of the sidecars it spawns, the worst they get is
+that one user's namespace. There's no road from there to root on the host, which
+is the whole point. The longer version is in
+[`docs/design/solution-design.md`](docs/design/solution-design.md) §2.
 
-## Architecture at a glance
+## How it fits together
 
 ```mermaid
 flowchart TD
@@ -39,23 +54,43 @@ flowchart TD
   client["LAN client"] -->|https://tianlu-floci:4566| ufw --> c
 ```
 
-- The container runs as a **systemd user service** managed by a **Quadlet**
-  `.container` file (`~/.config/containers/systemd/floci.container`). Lingering
-  (`loginctl enable-linger`) keeps it running across logouts and reboots.
-- It mounts the **rootless Podman socket** so Floci can spawn sidecar containers
-  (RDS, ElastiCache, ECR, EKS/k3s, EC2, …) through Podman's Docker-compatible
-  API.
-- All sidecars share a named network, **`floci-net`**, which provides container
-  DNS and reachable IPs (the rootless default bridge does neither reliably).
-- **TLS** is Floci's built-in self-signed certificate. **Storage** is
-  persistent under `/home/floci/floci-data`.
+- The container runs as a systemd user service, described by a Quadlet
+  `.container` file at `~/.config/containers/systemd/floci.container`. Lingering
+  (`loginctl enable-linger`) keeps it alive across logouts and reboots.
+- It mounts the rootless Podman socket, which is how Floci spawns its sidecar
+  containers (RDS, ElastiCache, ECR, EKS/k3s, EC2, and friends) through Podman's
+  Docker-compatible API.
+- All those sidecars sit on one named network, `floci-net`, so they get real
+  container DNS and reachable IPs. The rootless default bridge reliably gives you
+  neither, which is why I don't lean on it.
+- TLS is Floci's own self-signed certificate. Storage lives under
+  `/home/floci/floci-data` and sticks around.
 
-Full design: [`docs/design/solution-design.md`](docs/design/solution-design.md).
+The full design is in [`docs/design/solution-design.md`](docs/design/solution-design.md).
+
+### Architecture notes
+
+Don't be intimidated by quadlets, systemd, and rootless Podman. If you don't know what they are, it's completely fine. 
+I knew very little about them when I started this project, and I started to learn about them from my lovely AI agents. They are really cool and powerful, and I think they are worth learning about. But if you just want to run Floci, you can ignore them and just run the `setup-floci.sh` script.
+
+## Getting started
+
+To try it on your Mac, type `make dev-up` and you're there! It'll print hints in
+the terminal on where to go next. That path spins up a small Ubuntu VM and runs
+everything inside it, so your Mac stays clean (there's more under
+[Persistent local dev environment](#persistent-local-dev-environment)).
+
+To install it on your own server, you'll want `setup-floci.sh` (see
+[Usage](#usage) below). Give it a go, and if it doesn't run, tell me.
+
+On Windows? Get a Mac, or a Linux box. On Linux I tried hard to keep the scripts
+portable, but if you hit a snag, help me fix it instead of heading to LinkedIn to
+bash me with angry comments. :D
 
 ## Prerequisites
 
-- Ubuntu **24.04+** (tested on 26.04 LTS), x86_64
-- Root or `sudo` for the setup phase (user creation, package install, firewall)
+- Ubuntu 24.04 or newer (I run it on 26.04 LTS), x86_64.
+- Root or `sudo` for the setup phase: it makes a user, installs packages, and touches the firewall.
 
 ## Usage
 
@@ -70,14 +105,14 @@ sudo ./setup-floci.sh --interactive
 sudo ./setup-floci.sh --firewall-scope=rfc1918
 ```
 
-The script runs seven phases: preflight → user setup → Podman setup →
-network & image → Floci config → start & verify → summary. It is **idempotent**
-— every step checks before it creates or modifies, so re-running is safe.
+The script works through seven phases: preflight, user setup, Podman setup,
+network and image, Floci config, start and verify, then a summary. It's
+idempotent, so every step looks before it creates or changes anything.
 
 ## Connecting clients
 
-Point any AWS SDK or CLI at `https://tianlu-floci:4566`. Because the certificate
-is self-signed, clients must disable TLS verification:
+Point any AWS SDK or CLI at `https://tianlu-floci:4566`. The certificate is
+self-signed, so you'll need to tell your client to stop verifying TLS:
 
 ```bash
 aws --endpoint-url https://tianlu-floci:4566 --no-verify-ssl s3 ls
@@ -88,11 +123,11 @@ import boto3
 s3 = boto3.client("s3", endpoint_url="https://tianlu-floci:4566", verify=False)
 ```
 
-The installer adds `127.0.0.1 tianlu-floci` to `/etc/hosts` so host-side tooling
-resolves the name without DNS. For **other machines on the LAN**, a future
-`setup-dnsmasq.sh` stage maps `tianlu-floci` to the server's LAN IP
-(see [`docs/design/dnsmasq-design.md`](docs/design/dnsmasq-design.md)); it is not
-a prerequisite.
+The installer drops `127.0.0.1 tianlu-floci` into `/etc/hosts`, so tooling on the
+server itself resolves the name without any DNS. For other machines on your LAN,
+a future `setup-dnsmasq.sh` stage will point `tianlu-floci` at the server's LAN
+IP (see [`docs/design/dnsmasq-design.md`](docs/design/dnsmasq-design.md)). You
+don't need it to get going.
 
 ## Ports & services
 
@@ -108,28 +143,35 @@ a prerequisite.
 | 9169      | EC2 IMDS              | firewall (host-bound)     |
 | 9200-9299 | Lambda Runtime API    | internal only             |
 
-"Host-bound" ports are opened in UFW but bound directly on the host by the
-sidecar container, not via the Floci container's `-p` flags.
+The "host-bound" ports get opened in UFW, but the sidecar container binds them
+straight on the host, not through the Floci container's `-p` flags.
 
-Do **not** open k3s *workload* ports (from `LoadBalancer`/`NodePort` services) in
-UFW — UFW's default-deny INPUT policy is the primary control. Put a reverse proxy
-with auth and TLS in front of anything that genuinely needs external access. See
+Don't open the k3s *workload* ports (the ones from `LoadBalancer` or `NodePort`
+services) in UFW. The default-deny INPUT policy is the real control here. If
+something really has to be reachable from outside, put a reverse proxy with auth
+and TLS in front of it. Details in
 [`docs/design/solution-design.md`](docs/design/solution-design.md) §10.
 
-## Security posture — read before exposing
+## Security, or the lack of it
 
-- **Unauthenticated by default.** `FLOCI_AUTH_VALIDATE_SIGNATURES=false` — any
-  client with network access has full, unauthenticated control of every Floci
-  resource. Deploy only on a **fully trusted, single-tenant LAN** (no guest
-  WiFi, no untrusted VPN peers, no untrusted IoT on the same subnet).
-- **Self-signed TLS provides encryption, not authentication.** A LAN host that
-  can ARP-spoof can MITM the connection. Use certificates from a trusted CA if
-  untrusted users share the network.
-- **Access to the `floci` user is access to the Podman socket** — do not grant
-  `sudo -u floci` to anyone you would not trust with full Floci control.
+This is a development playground with the vision of a secure local cloud, but
+it's nowhere near secure yet. Please don't run it on your network and expect the
+bad guys not to find it, especially with the million open ports and no signature
+validation. Here's the honest version of what that means:
 
-Details and mitigations: [`docs/design/solution-design.md`](docs/design/solution-design.md)
-§11 and [`REVIEW.md`](REVIEW.md).
+- **It's wide open by default.** `FLOCI_AUTH_VALIDATE_SIGNATURES=false`, so
+  anyone who can reach it over the network has full control of everything in it,
+  no credentials required. Only put this on a network you own and trust
+- **Self-signed TLS encrypts the traffic, it doesn't prove who's on the other
+  end.** A machine on the same LAN that can ARP-spoof can sit in the middle of
+  the connection. If people you don't trust share the network, use a real
+  CA-signed certificate.
+- **Whoever can become the `floci` user owns the Podman socket.** So don't hand
+  `sudo -u floci` to anyone you wouldn't trust with the whole thing.
+
+If you want the mitigations and the gory details, they're in
+[`docs/design/solution-design.md`](docs/design/solution-design.md) §11 and
+[`REVIEW.md`](REVIEW.md).
 
 ## Development & testing
 
@@ -141,35 +183,36 @@ make check               # both
 make twin-test            # build + drive the Lima digital twin (Apple Silicon, macOS 13+)
 ```
 
-For the full guide — the three test tiers, how to run each, and how to wire
-them to run automatically after every change to `setup-floci.sh` (pre-commit
-hook + GitHub Actions) — see [`docs/testing-guide.md`](docs/testing-guide.md).
+For the full story (the three test tiers, how to run each, and how to wire them
+so they run automatically after every change to `setup-floci.sh`, via a
+pre-commit hook and GitHub Actions), see
+[`docs/testing-guide.md`](docs/testing-guide.md).
 
-Podman/systemd/UFW behaviour is exercised two ways: the `tests/` bats suite
-mocks those commands for fast unit feedback, and the **Lima digital twin**
-(`mock-server/run-test.sh`) runs the installer end-to-end inside a headless
-Ubuntu arm64 VM to validate the full control-plane behavior — systemd-logind,
-rootless Podman, AppArmor enforcement, Quadlet generation, UFW rule
-generation, and reboot autostart — before it touches the real x86_64 server.
-The twin is an arm64 integration twin; architecture-specific Floci/sidecar
-runtime behavior on x86_64 is out of scope for the twin and must be validated
-on an x86_64 host. See
+I check the Podman, systemd, and UFW behaviour two ways. The `tests/` bats suite
+mocks those commands so the unit tests stay fast, and the Lima digital twin
+(`mock-server/run-test.sh`) runs the installer end to end inside a headless
+Ubuntu arm64 VM. The twin is the one that actually exercises the real
+control-plane behaviour: systemd-logind, rootless Podman, AppArmor enforcement,
+Quadlet generation, UFW rules, and autostart after a reboot, all before any of it
+touches the real x86_64 server. One catch: the twin is arm64, so anything that's
+specifically an x86_64 runtime quirk in Floci or its sidecars still has to be
+checked on a real x86_64 box. The design is in
 [`docs/design/digital-twin-testing-design.md`](docs/design/digital-twin-testing-design.md).
 
 ### Persistent local dev environment
 
-Use the dev twin for interactive local AWS development. Unlike the test twin (`make twin-test`), the dev twin is persistent — AWS state survives `make dev-down` / `make dev-up` and even `make dev-recreate`.
+This is the one you'll actually develop against. Unlike the test twin (`make twin-test`), which throws itself away when it's done, the dev twin sticks around: your AWS state survives `make dev-down`, `make dev-up`, and even `make dev-recreate`.
 
 ```bash
 # Prerequisites (one-time):
 brew install lima qemu   # Lima VM + QEMU for Apple Silicon
 
-# First-time setup (~10–15 min on first run; ~30s on subsequent dev-up):
+# First-time setup (~10-15 min on first run; ~30s after that):
 make dev-up
 
 # Configure the AWS CLI and load env vars into this shell:
 eval "$(make dev-env -- --export)"
-# Then use the AWS CLI normally (self-signed TLS — --no-verify-ssl or profile ca_bundle):
+# Then use the AWS CLI normally (self-signed TLS, so --no-verify-ssl or a profile ca_bundle):
 aws s3 mb s3://my-bucket
 aws s3 ls
 ```
@@ -182,13 +225,13 @@ aws s3 ls
 | `make dev-shell` | Open an interactive shell inside the VM |
 | `make dev-env` | Configure AWS CLI profile and print export instructions |
 | `make dev-recreate` | Delete and recreate the VM OS; retain all AWS data |
-| `make dev-reset CONFIRM=reset` | Delete VM **and** data disk — permanent |
+| `make dev-reset CONFIRM=reset` | Delete VM **and** data disk, for good |
 
-**Persistent storage**: AWS state lives on the standalone `floci-dev-data` disk (30 GiB). The disk survives `make dev-recreate` and `make dev-down`/`dev-up`. Only `make dev-reset` deletes it.
+**Persistent storage**: your AWS state lives on a standalone `floci-dev-data` disk (30 GiB). It survives `make dev-recreate` and `make dev-down`/`dev-up`. Only `make dev-reset` wipes it.
 
-**Ports**: all user-facing service ports are forwarded to `127.0.0.1`. Lambda Runtime API ports **9200–9299 are not forwarded** (internal only).
+**Ports**: every user-facing service port is forwarded to `127.0.0.1`. The Lambda Runtime API ports (9200-9299) are not, on purpose, since they're internal only.
 
-**Isolation**: the dev environment uses a separate `floci-dev` Lima instance and `floci-dev-data` disk; it shares no state with `make twin-test` (`floci-twin`).
+**Isolation**: the dev environment runs on its own `floci-dev` Lima instance and `floci-dev-data` disk. It shares nothing with `make twin-test` (`floci-twin`), so you can't accidentally trash one from the other.
 
 ## Repository map
 
@@ -211,4 +254,4 @@ aws s3 ls
 
 ## Roadmap
 
-- `setup-dnsmasq.sh` — LAN-wide DNS resolution for `tianlu-floci` → server IP.
+- `setup-dnsmasq.sh`: LAN-wide DNS so `tianlu-floci` resolves to the server's IP for every machine on the network, not just the server itself.

@@ -16,7 +16,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.95.0, < 7.0.0"
+      version = ">= 6.56.0"
     }
   }
   # NOTE: intentionally LOCAL state. Keep terraform.tfstate out of git (see .gitignore);
@@ -67,7 +67,10 @@ variable "beta_vpc_cidr" {
 }
 
 provider "aws" {
-  region     = var.region
+  region = var.region
+  # A 12-digit AKID selects the Floci account and authenticates as its root principal
+  # (accepted; see docs/design/authentication-plan.md). Floci 1.5.33-compat does not verify
+  # the secret (docs/issues/floci-signature-validation-ignored.md).
   access_key = var.account_id
   secret_key = var.secret_key
 

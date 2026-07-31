@@ -1,0 +1,26 @@
+# infra/.gitignore — generated and machine-local Terraform artefacts.
+# Repo-wide Terraform ignores (.terraform/, *.tfstate, crash logs) live in the root
+# .gitignore; only the infra-specific ones belong here.
+
+# providers.tf and versions.tf inside live/<stage>/ are GENERATED: stage.sh's
+# sync_templates copies them from infra/_common/ on `make init`. Those two templates are
+# the single source of truth — edit them and re-run `make init`, or
+# `make init FLAGS=--force` to overwrite a copy that has drifted.
+#
+# 00-backend-bootstrap is exempt: it declares its own provider and required_providers
+# inline in main.tf (chicken/egg — it creates the backend), so it is never synced and has
+# no copy to ignore.
+live/*/providers.tf
+live/*/versions.tf
+
+# Data dir for `make validate` / `stage.sh validate`. Deliberately NOT named .terraform,
+# so that a credential-free validate cannot disturb the real `init`. That also means the
+# root .gitignore's `**/.terraform/*` rule does not cover it — hence this entry.
+live/*/.terraform-validate/
+
+# Saved plan files, e.g. `terraform plan -out=tfplan`. These embed variable values and
+# can contain secrets, so they must never be committed.
+*.tfplan
+
+# Left behind when an apply is interrupted while holding the state lock.
+.terraform.tfstate.lock.info

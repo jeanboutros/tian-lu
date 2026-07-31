@@ -7,14 +7,12 @@
 #   terraform-aws-modules/eks 21.24.0        — https://github.com/terraform-aws-modules/terraform-aws-eks/releases/tag/v21.24.0
 
 terraform {
-  required_version = ">= 1.9.0"
+  required_version = ">= 1.15.8"
 
   required_providers {
-    # NOTE: terraform-aws-modules/eks v21 may require the AWS provider >= 6.0. If `terraform init`
-    # reports a constraint conflict, tighten this to ">= 6.0.0, < 7.0.0".
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.95.0, < 7.0.0"
+      version = ">= 6.56.0"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"

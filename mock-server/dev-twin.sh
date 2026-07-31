@@ -2,28 +2,36 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# TODO: add a --verbose flag to enable tracing (set -x) and print debug info
+# set -x
+
 # shellcheck disable=SC2034
 readonly DEV_TWIN_NAME="${DEV_TWIN_NAME:-floci-dev}"
 readonly DEV_DISK_NAME="${DEV_DISK_NAME:-floci-dev-data}"
+readonly DEV_DISK_MOUNT="${DEV_DISK_MOUNT:-/mnt/lima-${DEV_DISK_NAME}}"
 readonly DEV_DISK_SIZE="${DEV_DISK_SIZE:-30GiB}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly REPO_ROOT
 readonly DEV_TEMPLATE="${SCRIPT_DIR}/lima/floci-dev.yaml"
-readonly DEV_GUEST_DATA_ROOT="/mnt/lima-floci-dev-data/floci-data"
+readonly DEV_GUEST_DATA_ROOT="${DEV_DISK_MOUNT}/floci-data"
 readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_MARKER_END="# END tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_ENTRY="127.0.0.1 tianlu-floci"
 readonly DEV_HEALTH_URL="http://tianlu-floci:4566/_floci/init"
-# Health-check poll budget. The Running branch (service already up) needs only
-# a short window; the Stopped/resume branch reuses this budget but the resume
-# path can take much longer on a cold QEMU arm64 boot (see DEV_RESUME_HEALTH_*).
-readonly DEV_HEALTH_TRIES=60
-readonly DEV_HEALTH_SLEEP=2
 readonly DEV_START_BUDGET_FIRST=600
 readonly DEV_START_BUDGET_RESUME=120
 readonly DEV_STOP_BUDGET=30
 readonly DEV_POLL_INTERVAL=5
+readonly DEV_REGION="${DEV_REGION:-eu-west-2}"
+readonly DEV_AUTH_MODE="${DEV_AUTH_MODE:-sigv4}"
+# Deployment identity is the 12-digit account AKID (account root). Floci ignores the
+# secret today (docs/issues/floci-signature-validation-ignored.md); we still generate a
+# per-env secret and manage a project-local AWS profile so the host ~/.aws stays clean.
+readonly DEV_ACCOUNT_AKID="${DEV_ACCOUNT_AKID:-111111111111}"
+readonly DEV_PROFILE="${DEV_PROFILE:-ns-tianlu-floci-dev}"
+readonly DEV_AWS_DIR="${DEV_AWS_DIR:-${HOME}/.cache/tianlu-floci/aws}"
+readonly DEV_ACCOUNT_SECRET_FILE="${DEV_ACCOUNT_SECRET_FILE:-${HOME}/.cache/tianlu-floci/dev/account.secret}"
 
 # --- Resume-path budgets -----------------------------------------------------
 # On a Lima resume the floci user manager starts asynchronously after the
@@ -114,9 +122,12 @@ dev_disk_exists() {
   out="$(limactl disk list --json 2>/dev/null)" || rc=$?
   if [[ $rc -ne 0 ]]; then
     printf 'ERROR: limactl-disk-list: failed to query disk state\n' >&2
-    return 1
+    return 2
   fi
-  printf '%s' "$out" | grep -qF "\"name\":\"${DEV_DISK_NAME}\""
+  if printf '%s' "$out" | grep -qF "\"name\":\"${DEV_DISK_NAME}\""; then
+    return 0
+  fi
+  return 1
 }
 
 dev_disk_state_safe() {
@@ -134,7 +145,7 @@ dev_disk_state_safe() {
 
 verify_disk_mount() {
   limactl shell "${DEV_TWIN_NAME}" -- bash -c \
-    'findmnt -no FSTYPE,SOURCE /mnt/lima-floci-dev-data 2>/dev/null | grep -qE "^ext4 /dev/vd[a-z][0-9]+$"' 2>/dev/null
+    "findmnt -no FSTYPE,SOURCE ${DEV_DISK_MOUNT} 2>/dev/null | grep -qE '^ext4 /dev/vd[a-z][0-9]+\$'" 2>/dev/null
 }
 
 _validate_hosts_markers() {
@@ -302,14 +313,9 @@ _wait_running() {
 }
 
 _health_check() {
-  local i code
-  for ((i = 0; i < DEV_HEALTH_TRIES; i++)); do
-    code="$(curl -s --connect-timeout 10 --max-time 15 --resolve tianlu-floci:4566:127.0.0.1 -o /dev/null -w "%{http_code}" "$DEV_HEALTH_URL" 2>/dev/null || echo "000")"
-    if [[ "$code" == "200" ]]; then
-      return 0
-    fi
-    sleep "$DEV_HEALTH_SLEEP"
-  done
+  if _resume_health_check; then
+    return 0
+  fi
   printf 'ERROR: health: Floci did not return HTTP 200\n' >&2
   return 1
 }
@@ -443,7 +449,7 @@ _install_exec_condition() {
   local uid tmpfile
   uid="$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'id -u floci 2>/dev/null' 2>/dev/null)"
   tmpfile="$(mktemp /tmp/exec-condition.XXXXXX)"
-  printf '[Service]\nExecCondition=/bin/bash -c '"'"'findmnt -no FSTYPE,SOURCE /mnt/lima-floci-dev-data 2>/dev/null | grep -qE "^ext4 /dev/vd[a-z][0-9]+$"'"'"'\n' > "$tmpfile"
+  printf '[Service]\nExecCondition=/bin/bash -c '"'"'findmnt -no FSTYPE,SOURCE %s 2>/dev/null | grep -qE "^ext4 /dev/vd[a-z][0-9]+$"'"'"'\n' "$DEV_DISK_MOUNT" > "$tmpfile"
   limactl copy "$tmpfile" "$DEV_TWIN_NAME:/tmp/mount-condition.conf" 2>/dev/null
   limactl shell "$DEV_TWIN_NAME" -- bash -c 'sudo chmod 644 /tmp/mount-condition.conf' 2>/dev/null
   limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo -u floci env HOME=/home/floci XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus bash -c 'mkdir -p /home/floci/.config/systemd/user/floci.service.d && cp /tmp/mount-condition.conf /home/floci/.config/systemd/user/floci.service.d/mount-condition.conf && systemctl --user daemon-reload'" 2>/dev/null
@@ -463,25 +469,25 @@ _install_absent() {
     preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
   fi
   if dev_disk_exists; then
-    :
+    :  # disk present — nothing to create
   else
     rc=$?
-    if [[ $rc -eq 1 ]]; then
-      limactl disk create "$DEV_DISK_NAME" --size "$DEV_DISK_SIZE"
-    else
-      return 1
-    fi
+    case $rc in
+      1) limactl disk create "$DEV_DISK_NAME" --size "$DEV_DISK_SIZE" ;;
+      2) printf 'ERROR: disk-create: failed to query disk state\n' >&2; return 1 ;;
+      *) printf 'ERROR: disk-create: unexpected return code %d\n' "$rc" >&2; return 1 ;;
+    esac
   fi
   limactl start --name="$DEV_TWIN_NAME" --set=".mounts[0].location=\"${REPO_ROOT}\"" --tty=false "$DEV_TEMPLATE"
   _wait_running "$DEV_START_BUDGET_FIRST"
-  verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
-  limactl shell "$DEV_TWIN_NAME" -- bash -c 'sudo chmod 1777 /mnt/lima-floci-dev-data' 2>/dev/null
-  if [[ "$(limactl shell "$DEV_TWIN_NAME" -- bash -c 'stat -c %a /mnt/lima-floci-dev-data 2>/dev/null' 2>/dev/null)" != "1777" ]]; then
+  verify_disk_mount || { printf 'ERROR: disk-mount: %s is not an ext4 mount on /dev/vd*\n' "$DEV_DISK_MOUNT" >&2; return 1; }
+  limactl shell "$DEV_TWIN_NAME" -- bash -c "sudo chmod 1777 ${DEV_DISK_MOUNT}" 2>/dev/null
+  if [[ "$(limactl shell "$DEV_TWIN_NAME" -- bash -c "stat -c %a ${DEV_DISK_MOUNT} 2>/dev/null" 2>/dev/null)" != "1777" ]]; then
     printf 'ERROR: disk-mount: mount root mode is not 1777\n' >&2
     return 1
   fi
   _guest_ufw_baseline
-  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "cd / && FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT FLOCI_TLS_ENABLED=false FLOCI_TLS_SELF_SIGNED=false bash /opt/tianlu/setup-floci.sh" 2>/dev/null
+  limactl shell "$DEV_TWIN_NAME" -- sudo bash -c "cd / && FLOCI_HOST_PERSISTENT_PATH=$DEV_GUEST_DATA_ROOT FLOCI_TLS_ENABLED=false FLOCI_TLS_SELF_SIGNED=false FLOCI_AUTH_MODE=$DEV_AUTH_MODE bash /opt/tianlu/setup-floci.sh" 2>/dev/null
   _install_exec_condition
   managed_hosts_add
   _health_check
@@ -520,6 +526,21 @@ _resume_health_check() {
   return 1
 }
 
+# _ensure_account_secret
+# Generate and cache a per-env random secret for the account-root credential.
+# Floci does not verify the secret today (docs/issues/floci-signature-validation-ignored.md),
+# but we carry a real one so the setup is correct for a future signature-honoring build.
+# Idempotent: reuse the cached value if present. Mode 0600, atomic tmp -> mv.
+_ensure_account_secret() {
+  local tmp
+  [[ -s "$DEV_ACCOUNT_SECRET_FILE" ]] && return 0
+  mkdir -p "$(dirname "$DEV_ACCOUNT_SECRET_FILE")"
+  tmp="$(mktemp "${DEV_ACCOUNT_SECRET_FILE}.XXXXXX")"
+  openssl rand -hex 32 > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$DEV_ACCOUNT_SECRET_FILE"
+}
+
 # _print_next_steps
 # Print a next-steps block after a successful dev_up: how to set AWS env vars,
 # connect to the VM, check the Floci service, view logs, and (if the user
@@ -536,9 +557,9 @@ _print_next_steps() {
   printf '\n'
   printf '      eval "$(make dev-env -- --export)"\n'
   printf '\n'
-  printf '   This exports AWS_PROFILE=floci-dev, AWS_ENDPOINT_URL, and\n'
-  printf '   AWS_DEFAULT_REGION. The floci-dev profile + credentials were\n'
-  printf '   written to ~/.aws/config and ~/.aws/credentials.\n'
+  printf '   Exports AWS_PROFILE=%s plus AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE\n' "$DEV_PROFILE"
+  printf '   pointing at a project-local store under ~/.cache/tianlu-floci/aws\n'
+  printf '   (your real ~/.aws is left untouched). The endpoint is baked into the profile.\n'
   printf '\n'
   printf '2. Floci endpoint:\n'
   printf '\n'
@@ -579,6 +600,16 @@ _print_next_steps() {
   printf '      make dev-recreate    # rebuild OS from checkout, keep data disk\n'
   printf '      make dev-reset       # destroy everything (VM + disk + hosts)\n'
   printf '\n'
+  printf '7. Auth posture:\n'
+  printf '\n'
+  printf '   Deployment authenticates as the account-root identity (AKID %s).\n' "$DEV_ACCOUNT_AKID"
+  printf '   The floci-deployer IAM user is seeded but NOT used for deployment yet —\n'
+  printf '   switch to it once Floci supports per-account IAM users.\n'
+  if [[ "$DEV_AUTH_MODE" == "sigv4" ]]; then
+    printf '   NOTE: sigv4 is requested but Floci 1.5.33-compat does not verify signatures\n'
+    printf '   (docs/issues/floci-signature-validation-ignored.md) — not yet an enforced boundary.\n'
+  fi
+  printf '\n'
 }
 
 dev_up() {
@@ -590,13 +621,14 @@ dev_up() {
     Running)
       managed_hosts_add
       _health_check
+      dev_env
       _print_next_steps
       ;;
     Stopped)
       preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
       limactl start --tty=false "$DEV_TWIN_NAME"
       _wait_running "$DEV_START_BUDGET_RESUME"
-      verify_disk_mount || { printf 'ERROR: disk-mount: /mnt/lima-floci-dev-data is not an ext4 mount on /dev/vd*\n' >&2; return 1; }
+      verify_disk_mount || { printf 'ERROR: disk-mount: %s is not an ext4 mount on /dev/vd*\n' "$DEV_DISK_MOUNT" >&2; return 1; }
       # Wait for the floci user manager before any systemctl --user call;
       # then bring the service up (resetting a failed unit if the AppArmor
       # boot-race exhausted StartLimitBurst) and poll health with the
@@ -605,6 +637,7 @@ dev_up() {
       _ensure_service
       managed_hosts_add
       _resume_health_check
+      dev_env
       _print_next_steps
       ;;
     absent)
@@ -662,6 +695,10 @@ dev_status() {
     service=unavailable
     code=unavailable
   fi
+  # Surface the installed auth mode
+  local auth_mode
+  auth_mode="$(_run_as_floci_guest "grep '^FLOCI_AUTH_MODE=' /home/floci/floci-data/env.file 2>/dev/null | cut -d= -f2" || true)"
+  printf '   Auth mode:        %s\n' "${auth_mode:-unknown}"
   printf 'service: %s\nhealth: %s\n' "$service" "$code"
 }
 
@@ -688,16 +725,19 @@ dev_recreate() {
     limactl delete -f "$DEV_TWIN_NAME" 2>/dev/null || true
   fi
   if dev_disk_exists; then
-    :
+    :  # disk present — proceed with recreate
   else
     rc=$?
-    if [[ $rc -eq 1 ]]; then
-      printf 'ERROR: dev-recreate: data disk missing — run make dev-up for a fresh environment\n' >&2
-    fi
+    case $rc in
+      1) printf 'ERROR: dev-recreate: data disk missing — run make dev-up for a fresh environment\n' >&2 ;;
+      2) printf 'ERROR: dev-recreate: failed to query disk state\n' >&2 ;;
+      *) printf 'ERROR: dev-recreate: unexpected return code %d\n' "$rc" >&2 ;;
+    esac
     return 1
   fi
   preflight_ports || { printf 'ERROR: preflight: port check failed\n' >&2; return 1; }
   _install_absent SKIP_PREFLIGHT
+  _print_next_steps
 }
 
 _disk_instance() {
@@ -748,52 +788,71 @@ dev_reset() {
     fi
   else
     rc=$?
-    [[ $rc -eq 1 ]] || return 1
+    case $rc in
+      1) : ;;  # disk absent — nothing to delete
+      2) printf 'ERROR: disk-reset: failed to query disk state\n' >&2; return 1 ;;
+      *) printf 'ERROR: disk-reset: unexpected return code %d\n' "$rc" >&2; return 1 ;;
+    esac
   fi
   managed_hosts_remove
+  rm -f "$DEV_ACCOUNT_SECRET_FILE"
+  rm -rf "$DEV_AWS_DIR"
   printf 'Environment reset complete.\n'
 }
 
+# dev_env
+# Configure a project-local AWS profile for the account-root credential using
+# AWS_CONFIG_FILE + AWS_SHARED_CREDENTIALS_FILE, so the host ~/.aws is never touched
+# (Option C). The Floci endpoint is baked into the profile. With --export, print the three
+# env vars a shell needs; otherwise print a friendly connect block.
 dev_env() {
   assert_identity
-  local export_only=false aws_dir config_file creds_file
+  local export_only=false secret cfg creds
   [[ "${1:-}" == "--export" ]] && export_only=true
-  aws_dir="${HOME}/.aws"
-  config_file="${aws_dir}/config"
-  creds_file="${aws_dir}/credentials"
-  mkdir -p "$aws_dir"
-  if ! grep -q '\[profile floci-dev\]' "$config_file" 2>/dev/null; then
-    printf '\n[profile floci-dev]\nregion = eu-west-1\noutput = json\nca_bundle =\n' >> "$config_file"
-  fi
-  if ! grep -q '\[floci-dev\]' "$creds_file" 2>/dev/null; then
-    printf '\n[floci-dev]\naws_access_key_id = test\naws_secret_access_key = test\n' >> "$creds_file"
+  _ensure_account_secret
+  secret="$(cat "$DEV_ACCOUNT_SECRET_FILE")"
+  cfg="${DEV_AWS_DIR}/config"
+  creds="${DEV_AWS_DIR}/credentials"
+  mkdir -p "$DEV_AWS_DIR"
+  if command -v aws >/dev/null 2>&1; then
+    (
+      export AWS_CONFIG_FILE="$cfg" AWS_SHARED_CREDENTIALS_FILE="$creds"
+      aws configure set aws_access_key_id "$DEV_ACCOUNT_AKID" --profile "$DEV_PROFILE"
+      aws configure set aws_secret_access_key "$secret" --profile "$DEV_PROFILE"
+      aws configure set region "$DEV_REGION" --profile "$DEV_PROFILE"
+      aws configure set output json --profile "$DEV_PROFILE"
+      aws configure set endpoint_url "http://tianlu-floci:4566" --profile "$DEV_PROFILE"
+    )
+    chmod 0600 "$creds" 2>/dev/null || true
+  elif ! "$export_only"; then
+    printf '# aws CLI not found on PATH — install it, then re-run: make dev-env\n'
   fi
   if "$export_only"; then
-    printf 'export AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=http://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n'
+    printf 'export AWS_CONFIG_FILE=%s\nexport AWS_SHARED_CREDENTIALS_FILE=%s\nexport AWS_PROFILE=%s\n' \
+      "$cfg" "$creds" "$DEV_PROFILE"
   else
     # shellcheck disable=SC2016
-    printf '\n# AWS CLI configured for floci-dev twin:\n# Profile "floci-dev" added to ~/.aws/config and ~/.aws/credentials\n#\n# To connect in this shell:\nexport AWS_PROFILE=floci-dev\nexport AWS_ENDPOINT_URL=http://tianlu-floci:4566\nexport AWS_DEFAULT_REGION=eu-west-1\n#\n# Or: eval "$(make dev-env -- --export)"\n'
+    printf '\n# AWS profile "%s" written to a project-local store (host ~/.aws untouched):\n#   %s\n#   %s\n#\n# To connect in this shell:\nexport AWS_CONFIG_FILE=%s\nexport AWS_SHARED_CREDENTIALS_FILE=%s\nexport AWS_PROFILE=%s\n#\n# Then: aws sqs list-queues   (endpoint is baked into the profile)\n# Or:   eval "$(make dev-env -- --export)"\n' \
+      "$DEV_PROFILE" "$cfg" "$creds" "$cfg" "$creds" "$DEV_PROFILE"
   fi
 }
 
 main() {
-  if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    unset DEV_HOSTS_FILE
-    assert_identity
-    local cmd="${1:-}"
-    shift || true
-    case "$cmd" in
-      up) dev_up "$@" ;;
-      down) dev_down "$@" ;;
-      status) dev_status "$@" ;;
-      shell) dev_shell "$@" ;;
-      recreate) dev_recreate "$@" ;;
-      reset) dev_reset "$@" ;;
-      env) dev_env "$@" ;;
-      '') printf 'Usage: dev-twin.sh <up|down|status|shell|recreate|reset|env>\n' >&2; return 1 ;;
-      *) printf 'ERROR: unknown subcommand: %s\n' "$cmd" >&2; return 1 ;;
-    esac
-  fi
+  unset DEV_HOSTS_FILE
+  assert_identity
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    up) dev_up "$@" ;;
+    down) dev_down "$@" ;;
+    status) dev_status "$@" ;;
+    shell) dev_shell "$@" ;;
+    recreate) dev_recreate "$@" ;;
+    reset) dev_reset "$@" ;;
+    env) dev_env "$@" ;;
+    '') printf 'Usage: dev-twin.sh <up|down|status|shell|recreate|reset|env>\n' >&2; return 1 ;;
+    *) printf 'ERROR: unknown subcommand: %s\n' "$cmd" >&2; return 1 ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

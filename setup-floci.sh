@@ -25,6 +25,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# TODO: add a --verbose flag to enable `set -x` for debugging
+# set -x 
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -51,11 +54,13 @@ readonly FLOCI_IMAGE="${FLOCI_IMAGE:-docker.io/floci/floci:1.5.33-compat}"
 readonly FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-tianlu-floci}"
 readonly FLOCI_API_PORT="${FLOCI_API_PORT:-4566}"
 readonly FLOCI_HEALTH_PATH="${FLOCI_HEALTH_PATH:-/_floci/init}"
-readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-1}"
+readonly FLOCI_DEFAULT_REGION="${FLOCI_DEFAULT_REGION:-eu-west-2}"
 readonly FLOCI_DEFAULT_ACCOUNT_ID="${FLOCI_DEFAULT_ACCOUNT_ID:-000000000000}"
 readonly FLOCI_STORAGE_MODE="${FLOCI_STORAGE_MODE:-persistent}"
 readonly FLOCI_STORAGE_PERSISTENT_PATH="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
 FLOCI_HOST_PERSISTENT_PATH="${FLOCI_HOST_PERSISTENT_PATH:-${FLOCI_DATA_DIR:-${FLOCI_HOME}/floci-data}}"
+
+# --- Floci TLS and base URL ---
 readonly FLOCI_TLS_ENABLED="${FLOCI_TLS_ENABLED:-true}"
 readonly FLOCI_TLS_SELF_SIGNED="${FLOCI_TLS_SELF_SIGNED:-true}"
 # FLOCI_BASE_URL scheme follows FLOCI_TLS_ENABLED so the URL written to the env
@@ -72,6 +77,37 @@ else
   readonly FLOCI_BASE_URL
 fi
 
+# --- Floci Auth posture ---
+# Auth posture is derived from FLOCI_AUTH_MODE and is NOT individually overridable:
+# (signatures=on, enforcement=off) authenticates callers and then ignores their
+# policies, which is strictly worse than leaving both off. Tests that need an
+# incoherent combination set FLOCI_AUTH_UNSAFE_OVERRIDE=1 and own the consequences.
+readonly FLOCI_AUTH_MODE="${FLOCI_AUTH_MODE:-sigv4}"
+case "$FLOCI_AUTH_MODE" in
+  off)   _auth_on="false" ;;
+  sigv4) _auth_on="true"  ;;
+  *) printf 'ERROR: FLOCI_AUTH_MODE must be "off" or "sigv4" (got: %s)\n' "$FLOCI_AUTH_MODE" >&2
+     exit 1 ;;
+esac
+if [[ "${FLOCI_AUTH_UNSAFE_OVERRIDE:-0}" == "1" ]]; then
+  readonly FLOCI_AUTH_VALIDATE_SIGNATURES="${FLOCI_AUTH_VALIDATE_SIGNATURES:-$_auth_on}"
+  readonly FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED="${FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED:-$_auth_on}"
+else
+  readonly FLOCI_AUTH_VALIDATE_SIGNATURES="$_auth_on"
+  readonly FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED="$_auth_on"
+fi
+# IAM service is always enabled — only enforcement tracks the mode.
+# FLOCI_SERVICES_IAM_ENABLED default is true; we set it explicitly so the
+# env file records the intent regardless of image defaults.
+readonly FLOCI_SERVICES_IAM_ENABLED="${FLOCI_SERVICES_IAM_ENABLED:-true}"
+# Seed deployer principal only when auth is on (sigv4 mode).
+if [[ "$FLOCI_AUTH_MODE" == "sigv4" ]]; then
+  readonly FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL="${FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL:-true}"
+else
+  readonly FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL="false"
+fi
+unset _auth_on
+
 # --- Ports (container -p mappings) ---
 readonly FLOCI_PORTS_CONTAINER=(
   "4566:4566"
@@ -80,15 +116,19 @@ readonly FLOCI_PORTS_CONTAINER=(
 )
 
 # --- Ports (UFW firewall rules) ---
+# Each range is annotated with its consumer. Ranges marked INFERRED have no
+# confirmed consumer — they are opened for future Floci service expansion but
+# are not published by the container and have no documented sidecar binding.
+# See AGENTS.md §Critical gotchas for the 5100-5199 ECR sidecar rationale.
 readonly FLOCI_PORTS_FIREWALL=(
-  "4566"
-  "6379:6399"
-  "7001:7099"
-  "5100:5199"
-  "6500:6599"
-  "9400:9499"
-  "2200:2299"
-  "9169"
+  "4566"        # Floci API (published)
+  "6379:6399"   # ElastiCache (published)
+  "7001:7099"   # DocumentDB (published)
+  "5100:5199"   # ECR sidecar (binds host-side directly, NOT published)
+  "6500:6599"   # INFERRED — no confirmed consumer
+  "9400:9499"   # INFERRED — no confirmed consumer
+  "2200:2299"   # INFERRED — no confirmed consumer
+  "9169"        # INFERRED — no confirmed consumer
 )
 
 # --- Firewall scope ---
@@ -395,6 +435,23 @@ assert_ubuntu_version() {
   fi
 }
 
+# assert_required_commands: verify curl and openssl are on PATH.
+# generate_presign_secret (Phase 5) needs openssl; verify_health (Phase 6)
+# needs curl. Failing early in Phase 1 avoids a late failure after all
+# mutating work is done.
+assert_required_commands() {
+  local cmd missing=()
+  for cmd in curl openssl; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    printf 'ERROR: required commands not found: %s\n' "${missing[*]}" >&2
+    exit 1
+  fi
+}
+
 # _system_profile_grants_userns <binary>: return 0 if any profile under
 # $APPARMOR_PROFILE_DIR attaches to <binary> and contains a `userns,` rule.
 # Used to detect Ubuntu 26.04+'s bundled podman/crun/pasta profiles so we do
@@ -446,13 +503,32 @@ assert_userns_allowed() {
   # re-exec (podman: "failed to reexec: Permission denied"). So each binary
   # gets a block ONLY if no system profile already grants it userns.
   #
+  # Map a chain binary to its custom profile name.
+  _profile_name_for_binary() {
+    case "$1" in
+      "$PODMAN_BIN")     printf 'podman-userns\n' ;;
+      "$CRUN_BIN")       printf 'podman-userns-crun\n' ;;
+      "$PASTA_BIN")      printf 'podman-userns-pasta\n' ;;
+      "$NEWUIDMAP_BIN")  printf 'newuidmap-userns\n' ;;
+      "$NEWGIDMAP_BIN")  printf 'newgidmap-userns\n' ;;
+      *)                 return 1 ;;
+    esac
+  }
+
   # If the permitting profile set is already fully loaded (every chain binary
-  # covered), there is nothing to install — short-circuit.
+  # covered by either a system profile or our custom profile), there is
+  # nothing to install — short-circuit. The sentinel is per-binary: on
+  # Ubuntu 26.04 the system podman profile means the podman-userns block is
+  # never written, so a single sentinel name would never match.
   local need_install=false
+  local profile_name
   for bin in "$PODMAN_BIN" "$CRUN_BIN" "$PASTA_BIN" "$NEWUIDMAP_BIN" "$NEWGIDMAP_BIN"; do
     [[ -f "$bin" ]] || continue
-    if ! _system_profile_grants_userns "$bin" \
-      && ! grep -q 'podman-userns' "${APPARMOR_PROFILES_FILE:-/dev/null}" 2>/dev/null; then
+    if _system_profile_grants_userns "$bin"; then
+      continue  # system profile covers this binary — nothing to install
+    fi
+    profile_name="$(_profile_name_for_binary "$bin")" || continue
+    if ! grep -q "$profile_name" "${APPARMOR_PROFILES_FILE:-/dev/null}" 2>/dev/null; then
       need_install=true
       break
     fi
@@ -627,12 +703,16 @@ configure_subuid_subgid() {
 # ----------------------------------------------------------------------------
 
 # install_podman: idempotent — skip if podman is already on PATH.
+# Also ensures curl and openssl are installed (needed by verify_health and
+# generate_presign_secret respectively). On a minimal Ubuntu image these may
+# be absent; installing them here avoids a late failure after all mutating
+# work is done.
 install_podman() {
   if command -v podman >/dev/null 2>&1; then
     return 0
   fi
   apt-get update
-  apt-get install -y podman uidmap
+  apt-get install -y podman uidmap curl openssl
 }
 
 # enable_lingering: enable systemd lingering for $FLOCI_USER and wait for the
@@ -833,6 +913,11 @@ FLOCI_SERVICES_DOCKER_NETWORK=${PODMAN_NETWORK}
 FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=${PODMAN_NETWORK}
 FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE=${FLOCI_HOSTNAME}
 FLOCI_AUTH_PRESIGN_SECRET=${PRESIGN_SECRET}
+FLOCI_AUTH_MODE=${FLOCI_AUTH_MODE}
+FLOCI_AUTH_VALIDATE_SIGNATURES=${FLOCI_AUTH_VALIDATE_SIGNATURES}
+FLOCI_SERVICES_IAM_ENABLED=${FLOCI_SERVICES_IAM_ENABLED}
+FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=${FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED}
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=${FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL}
 FLOCI_DOCKER_LOG_MAX_SIZE=${FLOCI_LOG_MAX_SIZE}
 FLOCI_DOCKER_LOG_MAX_FILE=${FLOCI_LOG_MAX_FILE}
 EOF
@@ -901,8 +986,9 @@ configure_firewall() {
 }
 
 # verify_health: poll the Floci health endpoint until it returns HTTP 200,
-# per §15.1. HTTP 200 = ready; 000 (connection refused/timeout) = not yet
-# started, retry; any other code = error, fail immediately.
+# per §15.1. HTTP 200 = ready; 000 (connection refused/timeout) and 5xx
+# (transient server errors, e.g. 503 while JVM warms up) = retry; 4xx
+# (client error — wrong endpoint, wrong scheme) = fail immediately.
 # The URL scheme follows FLOCI_TLS_ENABLED so the check stays correct whether
 # Floci serves TLS (production default) or plain HTTP (dev twin override).
 verify_health() {
@@ -921,10 +1007,12 @@ verify_health() {
     case "$code" in
       200) return 0 ;;
       000) sleep "$HEALTH_POLL_SLEEP" ;;
+      5[0-9][0-9]) sleep "$HEALTH_POLL_SLEEP" ;;
+      4[0-9][0-9]) printf 'ERROR: health check failed (HTTP %s — client error, not retrying)\n' "$code" >&2; exit 1 ;;
       *)   printf 'ERROR: health check failed (HTTP %s)\n' "$code" >&2; exit 1 ;;
     esac
   done
-  printf 'ERROR: health check timed out after %s tries\n' "$HEALTH_POLL_TRIES" >&2
+  printf 'ERROR: health check timed out after %s tries (last code: %s)\n' "$HEALTH_POLL_TRIES" "$code" >&2
   exit 1
 }
 
@@ -932,8 +1020,8 @@ verify_health() {
 # Phase 7 functions
 # ----------------------------------------------------------------------------
 
-# print_summary: final report — resolved firewall scope, a risk statement
-# (Floci is unauthenticated by default; self-signed TLS is encryption, not
+# print_summary: final report — resolved firewall scope, the auth posture
+# (sigv4 requested vs. unauthenticated; self-signed TLS is encryption, not
 # authentication), connection info, and on-disk locations.
 print_summary() {
   echo "================================================================"
@@ -943,10 +1031,18 @@ print_summary() {
   echo "Firewall scope: ${FIREWALL_SCOPE}"
   echo "Trusted subnets: ${UFW_TRUSTED_SUBNETS[*]:-}"
   echo
-  echo "RISK: Floci is UNAUTHENTICATED by default (FLOCI_AUTH_VALIDATE_SIGNATURES=false)."
-  echo "Any host within the trusted subnet(s) above has full control of all Floci"
-  echo "resources. Self-signed TLS provides encryption only, NOT authentication."
-  echo "Only run this on a fully trusted network (see docs/design/solution-design.md §10.4)."
+  if [[ "$FLOCI_AUTH_VALIDATE_SIGNATURES" == "true" ]]; then
+    echo "Auth: SigV4 validation + IAM enforcement are requested (auth_mode=sigv4)."
+    echo "KNOWN ISSUE: Floci 1.5.33-compat does not verify SigV4 signatures even when"
+    echo "requested, so this is not yet an enforced boundary. Treat the trusted subnet(s)"
+    echo "above as the real control until the upstream fix lands"
+    echo "(see docs/issues/floci-signature-validation-ignored.md)."
+  else
+    echo "RISK: Floci is UNAUTHENTICATED (auth_mode=off)."
+    echo "Any host within the trusted subnet(s) above has full control of all Floci"
+    echo "resources. Self-signed TLS provides encryption only, NOT authentication."
+    echo "Only run this on a fully trusted network (see docs/design/solution-design.md §10.4)."
+  fi
   echo
   echo "Connection URL: ${FLOCI_BASE_URL}"
   if [[ "$FLOCI_TLS_ENABLED" == "true" ]]; then
@@ -970,6 +1066,7 @@ main() {
   # Phase 1: Preflight
   assert_root_or_sudo
   assert_ubuntu_version
+  assert_required_commands
   detect_hostname_and_ip
   phase_pause
 

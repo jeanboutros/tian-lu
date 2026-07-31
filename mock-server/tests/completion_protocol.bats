@@ -72,6 +72,28 @@ teardown() {
   [[ "$output" == *"driver exited nonzero"* ]]
 }
 
+@test "wait_driver produces distinct verdict for killed-after-timeout (143)" {
+  run bash -c '
+    source "$ORCHESTRATOR"
+    sleep 10 &
+    DRIVER_SHELL_PID=$!
+    kill -TERM "$DRIVER_SHELL_PID" 2>/dev/null || true
+    wait_driver || printf "%s" "$FAIL_REASON"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"killed after timeout"* ]]
+}
+
+@test "wait_driver produces distinct verdict for empty DRIVER_SHELL_PID" {
+  run bash -c '
+    source "$ORCHESTRATOR"
+    DRIVER_SHELL_PID=""
+    wait_driver || printf "%s" "$FAIL_REASON"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"driver PID not set"* ]]
+}
+
 @test "validate_summary returns 0 for all-PASS summary" {
   if (( BASH_VERSINFO[0] < 4 )); then
     skip "validate_summary requires Bash 4 or newer"
