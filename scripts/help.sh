@@ -15,6 +15,10 @@ BUILD & CI (no VM required):
                      that pass on macOS (where those binaries are absent) but fail in CI.
                      Requires: podman (brew install podman; podman machine init/start).
                      Override: make ci-test CI_TEST_IMAGES="ubuntu:26.04"
+                     When to use: run by the pre-push hook on every push.
+  install-hooks    Install the committed git hooks (one-time per clone):
+                     pre-commit  make lint + make test on every commit
+                     pre-push    make ci-test (GitHub Actions reproducer) on every push
   twin-test        Build + drive the Lima digital twin end-to-end (Apple Silicon, macOS 13+).
                      Boots a headless Ubuntu arm64 VM, runs setup-floci.sh, proves idempotency,
                      spawns an arm64 Lambda sidecar, optionally reboots for autostart proof.

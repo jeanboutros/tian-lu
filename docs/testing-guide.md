@@ -2,7 +2,8 @@
 
 This guide explains the three test tiers, how to run each, and how to wire
 them so they run automatically after **every change to `setup-floci.sh`** —
-locally before a commit (pre-commit hook) and before pushing (`make twin-test`).
+locally before a commit (pre-commit hook), before pushing (`make ci-test`
+pre-push hook + `make twin-test`).
 
 For the design of each tier see:
 - Unit tests — `tests/` (mocked, fast; pattern documented in `AGENTS.md`).
@@ -96,30 +97,47 @@ Two layers: a local pre-commit hook (fast feedback before you commit) and a
 remote CI workflow (authoritative check on push/PR). Both are wired to fire
 when `setup-floci.sh` (or the harness) changes.
 
-### 3.1 Local — pre-commit hook
+### 3.1 Local — pre-commit and pre-push hooks
 
-A git pre-commit hook runs tiers 1 and 2 on every commit. They are fast
-(seconds) and catch most logic regressions locally before the slow twin run.
-Tier 3 is intentionally **not** in the pre-commit hook (15–30 min is too
-slow for an interactive commit); run `make twin-test` manually before
-pushing.
+Two committed hooks guard the local loop:
 
-To install the hook (one-time, per clone):
+- **pre-commit** runs tiers 1 and 2 (`make lint` + `make test`) on every
+  commit. Fast (seconds), catches most logic regressions before the slow twin
+  run.
+- **pre-push** runs `make ci-test` on every push. `ci-test` reproduces the
+  GitHub Actions environment in disposable podman containers
+  (ubuntu:24.04 + ubuntu:26.04), so a test that passes on macOS but fails on
+  Linux is caught before the push round-trip — not after. It blocks the push
+  on failure; it skips (with a warning) when podman is not installed, since CI
+  still enforces.
+
+Tier 3 is intentionally **not** in either hook (15–30 min is too slow for an
+interactive commit/push); run `make twin-test` manually before pushing.
+
+To install the hooks (one-time, per clone):
 
 ```bash
+make install-hooks
+# or, manually:
 cp scripts/pre-commit .git/hooks/pre-commit
-chmod +x .git/hooks/pre-commit
+cp scripts/pre-push .git/hooks/pre-push
+chmod +x .git/hooks/pre-commit .git/hooks/pre-push
 ```
 
-The hook (`scripts/pre-commit`) is committed to the repo so every clone can
-install it. It:
+The hooks (`scripts/pre-commit`, `scripts/pre-push`) are committed to the repo
+so every clone can install them. `scripts/pre-commit`:
 1. Runs `make lint` and `make test`.
 2. If `setup-floci.sh` or any harness script is staged, prints a reminder to
    run `make twin-test` before pushing (does not block — the twin is slow).
 3. Exits non-zero if lint or tests fail, aborting the commit.
 
-To bypass in an emergency: `git commit --no-verify` (use sparingly; CI will
-still enforce).
+`scripts/pre-push`:
+1. Runs `make ci-test` when the pushed commits touch the installer, harness,
+   tests, infra, Makefile, or scripts.
+2. Exits non-zero if ci-test fails, aborting the push.
+
+To bypass in an emergency: `git commit --no-verify` / `git push --no-verify`
+(use sparingly; CI will still enforce).
 
 ### 3.2 Remote — GitHub Actions CI
 
@@ -163,9 +181,10 @@ hosted CI job).
   must be validated on the x86_64 server.
 
 So: **edit `setup-floci.sh` → `make check` (lint+unit) locally → commit →
-`make twin-test` locally → push.** If the twin passes, the
-installer's control-plane behavior is validated for the production server's
-OS stack; only x86_64-runtime specifics remain to check on the real server.
+`make ci-test` (pre-push hook) → `make twin-test` locally → push.** If the
+twin passes, the installer's control-plane behavior is validated for the
+production server's OS stack; only x86_64-runtime specifics remain to check
+on the real server.
 
 ---
 
@@ -199,11 +218,14 @@ quirk, not an installer bug.
 # Fast local loop (seconds) — run before every commit:
 make check              # = make lint && make test
 
+# GitHub Actions reproducer (~1-2 min) — run by the pre-push hook:
+make ci-test            # = make check inside ubuntu:24.04 + ubuntu:26.04 containers
+
 # Full validation (15–30 min) — run before pushing a setup-floci.sh change:
 make twin-test          # = ./mock-server/run-test.sh --fresh --reboot-test
 
-# Install the pre-commit hook (one-time per clone):
-cp scripts/pre-commit .git/hooks/pre-commit && chmod +x scripts/pre-commit .git/hooks/pre-commit
+# Install the git hooks (one-time per clone):
+make install-hooks      # pre-commit (lint+test) + pre-push (ci-test)
 
 # Inspect the latest evidence after a twin run:
 ls -dt mock-server/evidence/*/ | head -1
@@ -211,9 +233,9 @@ ls -dt mock-server/evidence/*/ | head -1
 
 | You changed… | Run |
 | --- | --- |
-| `setup-floci.sh` (any phase) | `make check` → `make twin-test` |
-| `mock-server/**` (harness) | `make check` → `make twin-test` |
-| `tests/**` (unit tests) | `make test` |
+| `setup-floci.sh` (any phase) | `make check` → `make twin-test` (pre-push runs `ci-test`) |
+| `mock-server/**` (harness) | `make check` → `make twin-test` (pre-push runs `ci-test`) |
+| `tests/**` (unit tests) | `make test` (pre-push runs `ci-test`) |
 | `docs/**` only | nothing (no twin run needed; CI runs lint+unit regardless of path) |
 
 ---

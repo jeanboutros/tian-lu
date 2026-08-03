@@ -26,19 +26,20 @@ DEV_TWIN_SCRIPT := mock-server/dev-twin.sh
 MOCK_SHELLS := mock-server/run-test.sh mock-server/in-vm/run-in-vm.sh mock-server/in-vm/lib/assert.sh $(DEV_TWIN_SCRIPT)
 MOCK_SUDO := mock-server/tests/stubs/bin/sudo
 HOOK := scripts/pre-commit
+PRE_PUSH := scripts/pre-push
 HELP_SCRIPT := scripts/help.sh
 INFRA_SHELLS := infra/stage.sh infra/scripts/help.sh
 TWIN_FLAGS ?= --fresh --reboot-test
 CI_TEST_IMAGES ?= ubuntu:24.04 ubuntu:26.04
 
-.PHONY: help lint test check ci-test twin-test dev-up dev-down dev-status dev-shell dev-recreate dev-reset dev-env dev-env-export
+.PHONY: help lint test check ci-test twin-test install-hooks dev-up dev-down dev-status dev-shell dev-recreate dev-reset dev-env dev-env-export
 
 help:
 	@./scripts/help.sh
 
 lint:
-	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK) $(HELP_SCRIPT) $(INFRA_SHELLS)
-	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK) $(HELP_SCRIPT) $(INFRA_SHELLS)
+	shellcheck $(SCRIPT) $(STUB) $(MOCK_SHELLS) $(MOCK_STUB) $(MOCK_SUDO) $(HOOK) $(PRE_PUSH) $(HELP_SCRIPT) $(INFRA_SHELLS)
+	bash -n $(SCRIPT) $(MOCK_SHELLS) $(HOOK) $(PRE_PUSH) $(HELP_SCRIPT) $(INFRA_SHELLS)
 
 test:
 	bats tests/
@@ -70,6 +71,15 @@ ci-test:
 
 twin-test:
 	./mock-server/run-test.sh $(TWIN_FLAGS)
+
+# Install the committed git hooks (one-time per clone):
+#   pre-commit  make lint + make test on every commit
+#   pre-push    make ci-test (GitHub Actions reproducer) on every push
+install-hooks:
+	@cp scripts/pre-commit .git/hooks/pre-commit
+	@cp scripts/pre-push .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-commit .git/hooks/pre-push
+	@printf 'installed: .git/hooks/pre-commit (lint+test), .git/hooks/pre-push (ci-test)\n'
 
 dev-up:
 	$(DEV_TWIN_SCRIPT) up

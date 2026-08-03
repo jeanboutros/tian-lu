@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook: run `make ci-test` (the GitHub Actions reproducer) before
+# pushing, and block the push if it fails.
+#
+# Why: `make check` runs on macOS, where BSD stat, an installed aws CLI, and
+# GNU Make 3.81 mask Linux-only test bugs (GNU stat -f, missing aws, make -C
+# directory noise). GitHub Actions runs ubuntu-latest, so those tests fail
+# there but pass locally. `make ci-test` reproduces the CI environment in
+# disposable podman containers (ubuntu:24.04 + ubuntu:26.04) and catches
+# them before the push round-trip.
+#
+# Install (one-time per clone):
+#   make install-hooks
+#   # or: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# Bypass in an emergency: git push --no-verify (CI still enforces).
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Files whose change warrants a ci-test run. Docs-only pushes skip it.
+TRIGGER_RE='^(setup-floci\.sh|mock-server/|tests/|infra/|Makefile|scripts/)'
+
+# Pre-push stdin: one line per ref being pushed:
+#   <local ref> <local oid> <remote ref> <remote oid>
+# (remote oid is all-zeros for a brand-new branch.)
+changed_files=""
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+  if [[ "$remote_oid" =~ ^0+$ ]]; then
+    # New branch: diff against the merge-base with the default branch, or the
+    # whole tree if there is no default branch to compare against.
+    base="$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD origin/master 2>/dev/null || true)"
+    if [[ -n "$base" ]]; then
+      changed_files+="$(git diff --name-only "$base"..HEAD)"
+    else
+      changed_files+="$(git ls-files)"
+    fi
+  else
+    changed_files+="$(git diff --name-only "$remote_oid".."$local_oid")"
+  fi
+done
+
+if ! printf '%s\n' "$changed_files" | grep -qE "$TRIGGER_RE"; then
+  printf '[pre-push] no installer/harness/test/infra changes — skipping ci-test.\n' >&2
+  exit 0
+fi
+
+if ! command -v podman >/dev/null 2>&1; then
+  printf '[pre-push] WARNING: podman not found — skipping ci-test (CI will still enforce).\n' >&2
+  printf '[pre-push]          Install: brew install podman && podman machine init && podman machine start\n' >&2
+  exit 0
+fi
+
+printf '[pre-push] running make ci-test (GitHub Actions reproducer, ~1-2 min with warm podman cache) ...\n' >&2
+if ! make ci-test; then
+  printf '[pre-push] FAIL: make ci-test. A test passes on macOS but fails on Linux.\n' >&2
+  printf '[pre-push]        Fix it, then re-push. (Emergency bypass: git push --no-verify)\n' >&2
+  exit 1
+fi
+
+printf '[pre-push] OK\n' >&2
+exit 0
