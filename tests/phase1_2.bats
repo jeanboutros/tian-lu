@@ -118,15 +118,36 @@ teardown() {
 @test "assert_userns_allowed: no-op when value=1 and profile already loaded" {
   local sysctl_file="${TEST_TMP}/userns-sysctl"
   local profiles_file="${TEST_TMP}/apparmor-profiles"
+  local profile_dir="${TEST_TMP}/apparmor.d"
+  local fake_podman="${TEST_TMP}/podman"
+  local fake_crun="${TEST_TMP}/crun"
+  local fake_pasta="${TEST_TMP}/pasta"
+  local fake_newuidmap="${TEST_TMP}/newuidmap"
+  local fake_newgidmap="${TEST_TMP}/newgidmap"
   printf '1\n' >"$sysctl_file"
-  printf 'podman-userns (enforce)\n' >"$profiles_file"
+  # Every chain binary exists and every custom profile name is already loaded,
+  # so the short-circuit must fire. All paths are sandboxed under TEST_TMP: the
+  # real /etc/apparmor.d and /usr/bin/* must never be touched (on Linux the
+  # defaults exist, and a non-hermetic test would write to the real profile dir).
+  printf 'podman-userns (enforce)\npodman-userns-crun (enforce)\npodman-userns-pasta (enforce)\nnewuidmap-userns (enforce)\nnewgidmap-userns (enforce)\n' >"$profiles_file"
+  touch "$fake_podman" "$fake_crun" "$fake_pasta" "$fake_newuidmap" "$fake_newgidmap"
   run _run_fn \
     "export USERNS_SYSCTL_FILE='${sysctl_file}';
-     export APPARMOR_PROFILES_FILE='${profiles_file}'" \
+     export APPARMOR_PROFILES_FILE='${profiles_file}';
+     export APPARMOR_PROFILE_DIR='${profile_dir}';
+     export APPARMOR_USERNS_PROFILE='${profile_dir}/podman-userns';
+     export PODMAN_BIN='${fake_podman}';
+     export CRUN_BIN='${fake_crun}';
+     export PASTA_BIN='${fake_pasta}';
+     export NEWUIDMAP_BIN='${fake_newuidmap}';
+     export NEWGIDMAP_BIN='${fake_newgidmap}'" \
     "assert_userns_allowed"
   [ "$status" -eq 0 ]
+  # apparmor_parser must NOT have been called.
   run grep "apparmor_parser" "$STUB_LOG"
   [ "$status" -ne 0 ]
+  # No profile file must have been written.
+  [ ! -f "${profile_dir}/podman-userns" ]
 }
 
 @test "assert_userns_allowed: no-op when system profile already grants userns (Ubuntu 26.04)" {
