@@ -2,10 +2,25 @@
 
 load test_helper
 
+# Every path dev-twin.sh can DELETE or REWRITE is redirected into TEST_TMP here, for the
+# whole file, rather than per-test.
+#
+# This is not defensive styling. `dev_reset` runs `rm -f "$DEV_ACCOUNT_SECRET_FILE"` and
+# `rm -rf "$DEV_AWS_DIR"`; a dev_reset test that forgot either override deleted the
+# developer's real dev-twin credentials under ~/.cache/tianlu-floci — from a plain
+# `make test`. Exactly that happened once. A per-test override is one omission away from
+# happening again, so the sandbox lives here.
 setup() {
   setup_stub_env
   export DEV_HOSTS_FILE="${TEST_TMP}/hosts"
   printf '127.0.0.1 localhost\n192.168.1.5 someother\n' > "$DEV_HOSTS_FILE"
+
+  # HOME first, so anything derived from it that is added later lands here by default;
+  # then each path spelled out, so a reader can see what is sandboxed without deriving it.
+  # Both must agree — the values below are exactly what the script's defaults produce.
+  export HOME="${TEST_TMP}"
+  export DEV_AWS_DIR="${TEST_TMP}/.cache/tianlu-floci/aws"
+  export DEV_ACCOUNT_SECRET_FILE="${TEST_TMP}/.cache/tianlu-floci/dev/account.secret"
 }
 
 teardown() {
@@ -173,7 +188,7 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   "
   [ "$status" -eq 0 ]
   [[ "$output" == *"Next steps"* ]]
-  [[ "$output" == *"eval \"\$(make dev-env -- --export)\""* ]]
+  [[ "$output" == *"eval \"\$(make dev-env-export)\""* ]]
   [[ "$output" == *"make dev-status"* ]]
   [[ "$output" == *"make dev-shell"* ]]
   [[ "$output" == *"make dev-down"* ]]
@@ -433,6 +448,29 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   [ "$status" -eq 0 ]
 }
 
+@test "dev_status reads the auth mode from the installer env file" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    _run_as_floci_guest() { printf 'GUEST_CMD: %s\\n' \"\$*\" >&2; printf 'sigv4\\n'; }
+    dev_status 2>&1
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/home/floci/.config/floci/floci.env"* ]]
+  [[ "$output" == *"auth: sigv4"* ]]
+}
+
+@test "dev_status reports auth unknown when the env file is unreadable" {
+  run bash -c "
+    export STUB_LOG='${STUB_LOG}'
+    source '$DEV_SCRIPT'
+    _run_as_floci_guest() { return 1; }
+    dev_status 2>&1
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auth: unknown"* ]]
+}
+
 @test "dev_status does not call limactl start" {
   run bash -c "
     export STUB_LOG='${STUB_LOG}'
@@ -581,4 +619,64 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   "
   [ "$status" -eq 0 ]
   [ "$output" = "300" ]
+}
+
+# ===========================================================================
+# dev_env — export block and the project-local store
+#
+# These stay independent of the `aws` CLI and of `openssl`: neither is present in
+# the CI containers (make ci-test installs only make/shellcheck/bats/podman), and
+# the contract under test is the printed block, not what aws configure wrote.
+# The secret file is pre-created so _ensure_account_secret returns early.
+# ===========================================================================
+
+_dev_env_setup() {
+  mkdir -p "$(dirname "$DEV_ACCOUNT_SECRET_FILE")"
+  printf 'cafebabe\n' > "$DEV_ACCOUNT_SECRET_FILE"
+}
+
+@test "dev_env --export prints ONLY export lines on stdout (eval safety)" {
+  _dev_env_setup
+  run bash -c "source '$DEV_SCRIPT'; dev_env --export 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  # Anything else on stdout would be executed by `eval "$(make dev-env-export)"`.
+  run bash -c "source '$DEV_SCRIPT'; dev_env --export 2>/dev/null | grep -cv '^export '"
+  [ "$output" = "0" ]
+}
+
+@test "dev_env --export output is eval-able and sets the three variables" {
+  _dev_env_setup
+  run bash -c "
+    source '$DEV_SCRIPT'
+    eval \"\$(dev_env --export 2>/dev/null)\"
+    printf '%s\n%s\n%s\n' \"\$AWS_PROFILE\" \"\$AWS_CONFIG_FILE\" \"\$AWS_SHARED_CREDENTIALS_FILE\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ns-tianlu-floci-dev"* ]]
+  [[ "$output" == *"${DEV_AWS_DIR}/config"* ]]
+  [[ "$output" == *"${DEV_AWS_DIR}/credentials"* ]]
+}
+
+@test "dev_env points at the project-local store, never at ~/.aws" {
+  _dev_env_setup
+  run bash -c "source '$DEV_SCRIPT'; dev_env 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"${DEV_AWS_DIR}"* ]]
+  ! [[ "$output" == *"${HOME}/.aws"* ]]
+  [ -d "${DEV_AWS_DIR}" ]
+}
+
+# (secret generation/reuse is already covered above by
+#  "_ensure_account_secret generates a 0600 64-hex secret and reuses it")
+
+@test "the harness sandboxes every path dev_reset deletes (no real files at risk)" {
+  # If any of these ever points outside TEST_TMP again, `make test` deletes the developer's
+  # dev-twin credentials. See the comment on setup().
+  for v in HOME DEV_HOSTS_FILE DEV_AWS_DIR DEV_ACCOUNT_SECRET_FILE; do
+    [[ "${!v}" == "${TEST_TMP}" || "${!v}" == "${TEST_TMP}/"* ]] || {
+      printf 'FAIL: %s=%s is outside TEST_TMP\n' "$v" "${!v}" >&2
+      return 1
+    }
+  done
 }

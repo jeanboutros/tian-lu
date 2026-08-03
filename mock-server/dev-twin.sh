@@ -15,6 +15,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly REPO_ROOT
 readonly DEV_TEMPLATE="${SCRIPT_DIR}/lima/floci-dev.yaml"
 readonly DEV_GUEST_DATA_ROOT="${DEV_DISK_MOUNT}/floci-data"
+# Environment file the installer renders inside the guest (setup-floci.sh FLOCI_ENV_FILE);
+# the Quadlet loads it via `EnvironmentFile=%h/.config/floci/floci.env`. Mode 0600 owned by
+# floci, so it is only readable through _run_as_floci_guest. Distinct from the data root:
+# the dev twin puts Floci's data on the attached disk, not under /home/floci.
+readonly DEV_GUEST_ENV_FILE="${DEV_GUEST_ENV_FILE:-/home/floci/.config/floci/floci.env}"
 readonly DEV_HOSTS_MARKER_BEGIN="# BEGIN tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_MARKER_END="# END tianlu-floci (managed by dev-twin.sh)"
 readonly DEV_HOSTS_ENTRY="127.0.0.1 tianlu-floci"
@@ -555,11 +560,15 @@ _print_next_steps() {
   printf '\n'
   printf '1. AWS CLI — set environment variables for this shell:\n'
   printf '\n'
-  printf '      eval "$(make dev-env -- --export)"\n'
+  printf '      eval "$(make dev-env-export)"\n'
   printf '\n'
   printf '   Exports AWS_PROFILE=%s plus AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE\n' "$DEV_PROFILE"
   printf '   pointing at a project-local store under ~/.cache/tianlu-floci/aws\n'
   printf '   (your real ~/.aws is left untouched). The endpoint is baked into the profile.\n'
+  printf '\n'
+  printf '   Terraform needs none of this — infra/stage.sh reads the account secret from\n'
+  printf '   %s and derives the AKID from the tfvars, so\n' "$DEV_ACCOUNT_SECRET_FILE"
+  printf '   `make -C infra apply` works with nothing exported.\n'
   printf '\n'
   printf '2. Floci endpoint:\n'
   printf '\n'
@@ -695,11 +704,12 @@ dev_status() {
     service=unavailable
     code=unavailable
   fi
-  # Surface the installed auth mode
+  # The auth mode is fixed at install time and only changes on dev-recreate/dev-reset,
+  # so it is read from the installed env file rather than from DEV_AUTH_MODE (which
+  # reflects what the *next* install would use, not what is running).
   local auth_mode
-  auth_mode="$(_run_as_floci_guest "grep '^FLOCI_AUTH_MODE=' /home/floci/floci-data/env.file 2>/dev/null | cut -d= -f2" || true)"
-  printf '   Auth mode:        %s\n' "${auth_mode:-unknown}"
-  printf 'service: %s\nhealth: %s\n' "$service" "$code"
+  auth_mode="$(_run_as_floci_guest "grep '^FLOCI_AUTH_MODE=' ${DEV_GUEST_ENV_FILE} 2>/dev/null | cut -d= -f2" || true)"
+  printf 'service: %s\nhealth: %s\nauth: %s\n' "$service" "$code" "${auth_mode:-unknown}"
 }
 
 dev_shell() {
@@ -832,8 +842,9 @@ dev_env() {
       "$cfg" "$creds" "$DEV_PROFILE"
   else
     # shellcheck disable=SC2016
-    printf '\n# AWS profile "%s" written to a project-local store (host ~/.aws untouched):\n#   %s\n#   %s\n#\n# To connect in this shell:\nexport AWS_CONFIG_FILE=%s\nexport AWS_SHARED_CREDENTIALS_FILE=%s\nexport AWS_PROFILE=%s\n#\n# Then: aws sqs list-queues   (endpoint is baked into the profile)\n# Or:   eval "$(make dev-env -- --export)"\n' \
-      "$DEV_PROFILE" "$cfg" "$creds" "$cfg" "$creds" "$DEV_PROFILE"
+    printf '\n# AWS profile "%s" written to a project-local store (host ~/.aws untouched):\n#   %s\n#   %s\n#\n# To connect in this shell:\nexport AWS_CONFIG_FILE=%s\nexport AWS_SHARED_CREDENTIALS_FILE=%s\nexport AWS_PROFILE=%s\n#\n# Then: aws sqs list-queues   (endpoint is baked into the profile)\n# Or:   eval "$(make dev-env-export)"\n#\n# Terraform needs none of this: infra/stage.sh reads the account secret from\n#   %s\n# directly, so `make -C infra apply` works with nothing exported.\n' \
+      "$DEV_PROFILE" "$cfg" "$creds" "$cfg" "$creds" "$DEV_PROFILE" \
+      "$DEV_ACCOUNT_SECRET_FILE"
   fi
 }
 

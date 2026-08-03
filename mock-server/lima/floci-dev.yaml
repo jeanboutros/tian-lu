@@ -16,11 +16,30 @@ mountType: 9p
 base:
 - template:_images/ubuntu-26.04
 
+# --- Mounts ---------------------------------------------------------- #
+# The repository is mounted read-only at /opt/tianlu and the installer runs
+# from there as `sudo bash /opt/tianlu/setup-floci.sh` — the script is
+# committed mode 0644 and a read-only mount cannot be chmod'ed, so it has to
+# be passed to bash rather than executed. Read-only also guarantees the guest
+# cannot write back into the host working copy.
+#
+# Declaring `mounts:` replaces Lima's defaults entirely: there is no home
+# mount and no writable host mount. All guest state lives on the disk below.
+#
+# The location is a placeholder that keeps `limactl validate` passing. Lima
+# has no template variable for an arbitrary host path, so dev-twin.sh sets the
+# real one at create time with `--set='.mounts[0].location="<repo root>"'`.
 mounts:
 - location: "/Users/placeholder/tianlu"
   mountPoint: /opt/tianlu
   writable: false
 
+# --- Persistent data disk -------------------------------------------- #
+# Standalone ext4 disk, attached at /mnt/lima-floci-dev-data and formatted on
+# first boot. It is independent of the instance, so `make dev-recreate` can
+# rebuild the VM OS from the current checkout while Floci's data — installed
+# with FLOCI_HOST_PERSISTENT_PATH=/mnt/lima-floci-dev-data/floci-data — is
+# retained. Only `make dev-reset` deletes it.
 additionalDisks:
 - name: floci-dev-data
   format: true
@@ -56,11 +75,18 @@ portForwards:
   hostPort: 9169
   hostIP: "127.0.0.1"
 
+# --- User ------------------------------------------------------------ #
+# Lima-managed admin user with NOPASSWD sudo. `limactl shell` (make dev-shell)
+# lands here, and the installer is invoked from this account.
+#
+# Lima defaults user.name to the host macOS username AND user.uid to the host
+# UID — it does not look the uid up from the given name (Lima default.yaml
+# PR #2827). Pinning both removes that host coupling so the VM is reproducible
+# across machines. The installer-created `floci` user takes the next free uid
+# after this one; no configuration depends on its value, because the Quadlet
+# maps with `UserNS=keep-id:uid=1001,gid=1001`, which targets the uid inside
+# the container image rather than the host uid.
 user:
-  # Lima defaults user.name to the host macOS username AND user.uid to the host
-  # UID (NOT a lookup of the specified username — see Lima default.yaml PR #2827).
-  # Pinning both removes the host-coupling and makes the twin reproducible across
-  # machines. uid: 1001 avoids collision with the installer-created floci user (uid 1000).
   name: floci-runner
   uid: 1001
   passwordlessSudo: true

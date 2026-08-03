@@ -73,13 +73,18 @@ mounts:
   writable: true
 
 # --- User ------------------------------------------------------------ #
-# Lima-managed admin user with NOPASSWD sudo. The installer is invoked as
-# `sudo /opt/tianlu/setup-floci.sh` from this account.
+# Lima-managed admin user with NOPASSWD sudo. run-test.sh launches the guest
+# driver from this account with `sudo systemd-run`, so the driver — and the
+# installer it invokes as `sudo bash /opt/tianlu/setup-floci.sh` — run as root.
+#
+# Lima defaults user.name to the host macOS username AND user.uid to the host
+# UID — it does not look the uid up from the given name (Lima default.yaml
+# PR #2827). Pinning both removes that host coupling so the twin is reproducible
+# across machines. The installer-created `floci` user takes the next free uid
+# after this one; no configuration depends on its value, because the Quadlet
+# maps with `UserNS=keep-id:uid=1001,gid=1001`, which targets the uid inside
+# the container image rather than the host uid.
 user:
-  # Lima defaults user.name to the host macOS username AND user.uid to the host
-  # UID (NOT a lookup of the specified username — see Lima default.yaml PR #2827).
-  # Pinning both removes the host-coupling and makes the twin reproducible across
-  # machines. uid: 1001 avoids collision with the installer-created floci user (uid 1000).
   name: floci-runner
   uid: 1001
   passwordlessSudo: true

@@ -10,7 +10,8 @@ A separate persistent dev environment is available for interactive local AWS dev
 | `make dev-down` | Stop the VM; data preserved |
 | `make dev-status` | Show instance, disk, service, and health state |
 | `make dev-shell` | Open a shell inside the VM |
-| `make dev-env` | Configure AWS CLI `floci-dev` profile and print export instructions |
+| `make dev-env` | Configure the project-local `ns-tianlu-floci-dev` AWS CLI profile (your `~/.aws` is untouched) and print the connect block |
+| `make dev-env-export` | The same, printing only the `export` lines — for `eval` |
 | `make dev-recreate` | Rebuild VM OS; retain the `floci-dev-data` data disk |
 | `make dev-reset CONFIRM=reset` | Delete VM **and** data disk — permanent |
 
@@ -20,9 +21,39 @@ Quick start:
 ```bash
 brew install lima qemu
 make dev-up
-eval "$(make dev-env -- --export)"   # load AWS_PROFILE, AWS_ENDPOINT_URL, AWS_DEFAULT_REGION
-aws s3 ls                             # uses https://tianlu-floci:4566 with self-signed TLS
+eval "$(make dev-env-export)"   # AWS_PROFILE + the project-local config/credentials paths
+aws s3 ls                       # endpoint is baked into the profile
 ```
+For Terraform you need none of that — `infra/stage.sh` reads the account secret from
+`~/.cache/tianlu-floci/dev/account.secret` and the AKID from `infra/environments/<env>.tfvars`,
+so `make -C infra apply` works with nothing exported.
+
+### What the VM sees
+
+| Guest path | Source | Mode |
+| --- | --- | --- |
+| `/opt/tianlu` | the repository root on the host | read-only (9p) |
+| `/mnt/lima-floci-dev-data` | the standalone `floci-dev-data` disk (30 GiB, ext4) | read-write |
+| `/mnt/lima-floci-dev-data/floci-data` | Floci's persistent storage (`FLOCI_HOST_PERSISTENT_PATH`) | read-write, `0700 floci` |
+
+The repository mount is read-only, so nothing running in the VM can modify the
+host working copy; the installer is therefore invoked as
+`sudo bash /opt/tianlu/setup-floci.sh` rather than executed directly. The
+template's `mounts:` block replaces Lima's defaults, so there is no home mount
+and no writable host mount — anything that must survive `make dev-recreate`
+belongs on the data disk.
+
+`limactl shell` opens a login shell that `cd`s to the host working directory,
+which has no counterpart in the guest. The resulting
+`cd: /Users/...: No such file or directory` on stderr is expected; scripted
+calls suppress it with `2>/dev/null`.
+
+Two accounts exist in the VM:
+
+| User | Role |
+| --- | --- |
+| `floci-runner` (uid 1001) | Lima admin account with NOPASSWD sudo; `make dev-shell` lands here |
+| `floci` | unprivileged service account created by the installer; owns rootless Podman, `floci.service`, and the data directory. Password locked, lingering enabled |
 
 To inspect rootless Podman inside the VM:
 ```bash
@@ -68,10 +99,10 @@ ordering, and writes a manifest-validated evidence bundle:
 ./mock-server/run-test.sh --fresh --reboot-test
 ```
 
-> **Note (after updating Lima templates):** If you have an existing `floci-twin` Lima
-> instance created before the `floci-runner` username was pinned, delete it first:
-> `make twin-test TWIN_FLAGS="--fresh --destroy"`. The `--keep` default will fail
-> the pinned-user preflight check until the instance is recreated.
+> **Note:** the pinned-user preflight fails when an existing `floci-twin` instance
+> was created from a different `user:` block than the current template's. Recreate
+> it with `make twin-test TWIN_FLAGS="--fresh --destroy"`; the `--keep` default
+> keeps failing until it is.
 
 ### Flags
 
