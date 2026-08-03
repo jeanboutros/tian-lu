@@ -34,9 +34,16 @@ teardown() {
 
 # MAKEFLAGS/MFLAGS are cleared: this runs under `make test`, and an inherited jobserver flag
 # makes the nested make warn on stderr.
+#
+# --no-print-directory: the harness invokes make with -C (bats runs from tests/), and GNU
+# Make 4.x prints "make: Entering/Leaving directory" to STDOUT for -C. Those lines would
+# break the eval-safety assertions (a non-export line on stdout) and the eval itself
+# (eval would try to run "make: Entering directory ..." as a command). Real users run
+# `make dev-env-export` from the repo root, so the targets never see this; it is purely a
+# test-harness artifact.
 run_make() {
   run env -u MAKEFLAGS -u MFLAGS STUB_LOG="$STUB_LOG" \
-    make -C "$REPO_ROOT" "$@" DEV_TWIN_SCRIPT="$STUB"
+    make --no-print-directory -C "$REPO_ROOT" "$@" DEV_TWIN_SCRIPT="$STUB"
 }
 
 @test "dev-env-export passes --export through to the script" {
@@ -68,7 +75,7 @@ run_make() {
 
 @test "eval of dev-env-export output runs the script exactly once" {
   run env -u MAKEFLAGS -u MFLAGS STUB_LOG="$STUB_LOG" bash -c "
-    eval \"\$(make -C '$REPO_ROOT' dev-env-export DEV_TWIN_SCRIPT='$STUB')\"
+    eval \"\$(make --no-print-directory -C '$REPO_ROOT' dev-env-export DEV_TWIN_SCRIPT='$STUB')\"
     printf '%s\n' \"\$STUB_SAW_ARGS\"
   "
   [ "$status" -eq 0 ]
