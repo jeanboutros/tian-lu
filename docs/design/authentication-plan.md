@@ -82,7 +82,7 @@ build.
 `make dev-env` writes an AWS profile `ns-tianlu-floci-dev` into a project-local store
 (`~/.cache/tianlu-floci/aws/{config,credentials}`, mode `0600`) via `aws configure`, pointing
 `AWS_CONFIG_FILE` + `AWS_SHARED_CREDENTIALS_FILE` at that store so the host's real `~/.aws` is never
-touched. `eval "$(make dev-env -- --export)"` exports those two variables plus `AWS_PROFILE`; the
+touched. `eval "$(make dev-env-export)"` exports those two variables plus `AWS_PROFILE`; the
 endpoint is baked into the profile. `make dev-reset` removes the store and the cached secret.
 
 ### 5.2 Terraform

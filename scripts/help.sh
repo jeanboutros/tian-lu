@@ -27,7 +27,8 @@ PERSISTENT DEV TWIN (local Floci for interactive AWS development):
   dev-up           Create or resume the floci-dev Lima VM.
                      Runs setup-floci.sh only on first creation; subsequent calls resume fast.
                      Affects: ~/.lima/floci-dev (VM), /etc/hosts (tianlu-floci block),
-                              ~/.aws/{config,credentials} (floci-dev profile).
+                              ~/.cache/tianlu-floci/dev/account.secret (account credential).
+                     Your real ~/.aws is never written to.
                      When to use: daily start — resumes without reinstalling.
   dev-down         Stop the floci-dev VM. AWS data on the data disk is preserved.
                      When to use: free RAM/CPU without losing AWS state.
@@ -38,11 +39,18 @@ PERSISTENT DEV TWIN (local Floci for interactive AWS development):
                      Affects: ~/.lima/floci-dev (rebuilt); floci-dev-data disk is KEPT.
                      When to use: after installer/harness changes to re-run setup-floci.sh cleanly.
   dev-reset        Delete the VM AND the data disk — PERMANENT. Requires: CONFIRM=reset.
-                     Affects: deletes ~/.lima/floci-dev, floci-dev-data disk, /etc/hosts block.
+                     Affects: deletes ~/.lima/floci-dev, floci-dev-data disk, /etc/hosts block,
+                              and ~/.cache/tianlu-floci/ (profile store + account secret).
                      When to use: starting over from scratch. All AWS state is lost.
-  dev-env          Configure the AWS CLI floci-dev profile; print export instructions.
-                     Affects: ~/.aws/config, ~/.aws/credentials (adds floci-dev profile + creds).
-                     When to use: once per clone, then: eval "$(make dev-env -- --export)"
+  dev-env          Configure the project-local ns-tianlu-floci-dev AWS CLI profile and print
+                     the connect block.
+                     Affects: ~/.cache/tianlu-floci/aws/{config,credentials} only — your real
+                              ~/.aws is left untouched.
+                     When to use: once per clone, for interactive `aws` commands.
+  dev-env-export   The same, printing ONLY the export lines, for: eval "$(make dev-env-export)"
+                     Terraform needs neither: infra/stage.sh reads the account secret from
+                     ~/.cache/tianlu-floci/dev/account.secret and derives the AKID from the
+                     tfvars, so `make -C infra apply` works with nothing exported.
 
 PREREQUISITES:
   lint/test/check  brew install shellcheck bats-core

@@ -225,7 +225,7 @@ For interactive local AWS development (not testing), use the persistent dev twin
 ```bash
 brew install lima qemu   # one-time prerequisites
 make dev-up              # create or resume (~30s resume, ~10-15 min first run)
-eval "$(make dev-env -- --export)"  # load AWS CLI profile into this shell
+eval "$(make dev-env-export)"  # load AWS CLI profile into this shell
 make dev-status          # check instance, disk, service, and health
 make dev-down            # stop without losing data
 make dev-recreate        # rebuild VM OS, keep all AWS data

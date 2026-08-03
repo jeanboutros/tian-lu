@@ -11,6 +11,23 @@ initialization hooks and client tooling without me installing anything extra.
 > There's no application code in here, just the installer and the design docs
 > behind it. Floci itself is the container image.
 
+
+## Quick start
+
+```bash
+# print the help text:
+make
+# Start a persistent local dev environment on macOS (Apple Silicon, macOS 13+):
+# brew install lima qemu   # Lima VM + QEMU for Apple Silicon
+make dev-up
+# Configure the AWS CLI and load env vars into this shell:
+eval "$(make dev-env-export)"
+# get the identity configured in the previous step:
+aws sts get-caller-identity
+# it will not find any buckets yet, but you can create one:
+aws s3api list-buckets
+```
+
 ## Raison d'être
 
 I just started my journey into AWS and wanted a **local sandbox** to learn and experiment without incurring costs or risking my real AWS account. My other two options were to request a sandbox account from my employer or to use my own AWS account, but both have drawbacks: the former is slow and bureaucratic, and the latter is risky and expensive. 
@@ -211,7 +228,7 @@ brew install lima qemu   # Lima VM + QEMU for Apple Silicon
 make dev-up
 
 # Configure the AWS CLI and load env vars into this shell:
-eval "$(make dev-env -- --export)"
+eval "$(make dev-env-export)"
 # Then use the AWS CLI normally (self-signed TLS, so --no-verify-ssl or a profile ca_bundle):
 aws s3 mb s3://my-bucket
 aws s3 ls

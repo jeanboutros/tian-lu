@@ -31,7 +31,7 @@ INFRA_SHELLS := infra/stage.sh infra/scripts/help.sh
 TWIN_FLAGS ?= --fresh --reboot-test
 CI_TEST_IMAGES ?= ubuntu:24.04 ubuntu:26.04
 
-.PHONY: help lint test check ci-test twin-test dev-up dev-down dev-status dev-shell dev-recreate dev-reset dev-env
+.PHONY: help lint test check ci-test twin-test dev-up dev-down dev-status dev-shell dev-recreate dev-reset dev-env dev-env-export
 
 help:
 	@./scripts/help.sh
@@ -89,5 +89,18 @@ dev-recreate:
 dev-reset:
 	$(DEV_TWIN_SCRIPT) reset
 
+# The `@` on both recipes is load-bearing, not cosmetic. Without it make echoes the recipe
+# line to stdout, so `eval "$(make dev-env-export)"` would eval `mock-server/dev-twin.sh env`
+# as its first statement and run the script a SECOND time.
+#
+# --export lives in its own target rather than being passed through make: `make dev-env --
+# --export` does not work, because `--` ends make's option parsing and `--export` is then
+# parsed as a GOAL ("No rule to make target `--export'", exit 2) instead of reaching the
+# script. Two targets is the version that cannot be got wrong.
 dev-env:
-	$(DEV_TWIN_SCRIPT) env
+	@$(DEV_TWIN_SCRIPT) env
+
+# Prints ONLY `export VAR=value` lines on stdout (warnings go to stderr), so it is safe to
+# eval:  eval "$(make dev-env-export)"
+dev-env-export:
+	@$(DEV_TWIN_SCRIPT) env --export
