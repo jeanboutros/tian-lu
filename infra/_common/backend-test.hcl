@@ -12,11 +12,18 @@ key    = "test/PLACEHOLDER/terraform.tfstate"
 # >= 1.11 you can drop dynamodb_table and set use_lockfile = true for S3-native locking.
 dynamodb_table = "tf-locks-test"
 
-# access_key/secret_key are deliberately NOT set here (they would be written in cleartext
-# to .terraform/terraform.tfstate and plan files). Export the environment's account-root
-# credential before `terraform init`:
-#   export AWS_ACCESS_KEY_ID="222222222222"      # test AKID (selects the account, §4.1)
-#   export AWS_SECRET_ACCESS_KEY="<account secret>"  # ignored by Floci today (see docs/issues/)
+# access_key/secret_key are deliberately NOT set here: this file is committed, and Terraform
+# copies backend config verbatim into .terraform/ and plan files, which would persist the
+# secret in cleartext.
+#
+# You do NOT need to export them by hand -- `make init` / `stage.sh` derive the account-root
+# credential at runtime: AWS_ACCESS_KEY_ID from account_id in environments/<env>.tfvars (a
+# 12-digit AKID selects the Floci account, section 4.1), and AWS_SECRET_ACCESS_KEY from the
+# first of AWS_SECRET_ACCESS_KEY, TF_VAR_secret_key, or the dev twin's cached secret at
+# ~/.cache/tianlu-floci/dev/account.secret. Note the backend does NOT read
+# var.account_id/var.secret_key -- those configure only the `provider "aws"` block -- which
+# is why this derivation exists at all.
+# Setting AWS_ACCESS_KEY_ID to a different account is refused rather than silently honoured.
 
 skip_credentials_validation = true
 skip_metadata_api_check     = true

@@ -8,7 +8,7 @@
 #   https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/aws-account-management-and-separation.html
 
 environment = "dev"
-account_id  = "111111111111" # dev AKID (uat=222222222222, prod=333333333333 — future)
+account_id  = "111111111111" # dev AKID (test=222222222222, uat=333333333333, prod=444444444444)
 
 region         = "eu-west-2"
 floci_endpoint = "http://localhost:4566"

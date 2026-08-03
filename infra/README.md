@@ -25,7 +25,11 @@ picture is [`docs/learning/diagrams/solution.mmd`](../docs/learning/diagrams/sol
 - Podman + a running Floci at `http://localhost:4566` (the repo's `setup-floci.sh` / Lima dev-twin).
 - `terraform >= 1.15.8` (the pin in [`_common/versions.tf`](_common/versions.tf)), `aws` CLI v2,
   `kubectl`, `psql`, `docker`/`podman`.
-- `TF_VAR_secret_key` exported — every stage declares `var.secret_key` as sensitive with no default.
+- **No credential exports needed.** `make dev-up` writes the account secret to
+  `~/.cache/tianlu-floci/dev/account.secret`; [`stage.sh`](stage.sh) reads it and derives the AKID from
+  `environments/<env>.tfvars`. Override with `export TF_VAR_secret_key=<secret>` if you are pointing at a
+  Floci the dev twin did not create. Do **not** set `AWS_ACCESS_KEY_ID` or `AWS_PROFILE` — a mismatched
+  AKID is refused, and an ambient profile is unset (both have already caused a wrong-account `init` here).
 - **Run the pre-flight first** — it checks that Floci actually *enforces* what we teach:
   ```bash
   make -C infra preflight     # or directly: ./scripts/preflight-floci.sh
@@ -47,7 +51,6 @@ flowchart TB
 Apply a stage — `make` is the entry point (`make help` lists every target):
 ```bash
 cd infra
-export TF_VAR_secret_key=floci          # or: source ~/.cache/tianlu-twin/dev-credentials.env
 make init  STAGE=20-network-hub          # syncs _common templates, wires the per-env backend
 make plan  STAGE=20-network-hub
 make apply STAGE=20-network-hub          # runs the G1/G3 pre-flight gate first
@@ -57,6 +60,11 @@ Under the hood `make` calls [`stage.sh`](stage.sh), which is the only place terr
 derives `-backend-config=_common/backend-<env>.hcl`, the state key `<env>/<stage>/terraform.tfstate`,
 and `-var-file=environments/<env>.tfvars`, and special-cases `00-backend-bootstrap` (local state). Note
 `-backend-config` is an `init`-only flag; Terraform rejects it on `plan`/`apply`.
+
+> **Endpoints:** `environments/dev.tfvars` uses `http://localhost:4566` while the dev twin's AWS CLI
+> profile bakes in `http://tianlu-floci:4566`. Both reach the same Floci, but the hostname only resolves
+> if you accepted the managed `/etc/hosts` entry during `make dev-up` (it is optional). Terraform always
+> uses the tfvars value, so it works either way.
 
 > **Blast radius:** changing an upstream stage's outputs requires re-planning downstream stages, so apply
 > in topological order. `make plan-all` / `make apply-all` walk every stage in that order (`NN-` prefixes

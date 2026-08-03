@@ -38,6 +38,11 @@ FLAGS ?=
 # an empty scaffold directory can never be fed to apply-all.
 STAGES ?= $(sort $(notdir $(patsubst %/main.tf,%,$(wildcard live/*/main.tf))))
 
+# Where `make dev-up` caches the account-root secret. stage.sh reads the same file as the
+# last link of its secret chain; this is here so the guard below agrees with it, and so the
+# preflight gate authenticates with the real credential rather than the literal "test".
+TWIN_SECRET_FILE ?= $(HOME)/.cache/tianlu-floci/dev/account.secret
+
 # Derived from the environment's tfvars so they cannot drift from the Terraform config.
 # Recursive (=) not simple (:=), so an ENV override on the command line is picked up.
 AKID     = $(shell awk -F'"' '/^[[:space:]]*account_id[[:space:]]*=/     {print $$2}' environments/$(ENV).tfvars 2>/dev/null)
@@ -84,21 +89,42 @@ validate:
 # --- guards -----------------------------------------------------------------------------
 
 # Every stage declares `variable "secret_key"` as sensitive with no default
-# (_common/providers.tf, 00-backend-bootstrap/main.tf), so Terraform would otherwise stop
-# on an interactive prompt. Fail with the fix instead.
+# (_common/providers.tf, 00-backend-bootstrap/main.tf), so Terraform would otherwise stop on
+# an interactive prompt. stage.sh enforces this too, but checking here fails before the slow,
+# account-mutating preflight gate runs.
+#
+# The three accepted sources must match stage.sh's chain exactly -- a guard that is stricter
+# than the thing it guards refuses work that would have succeeded.
+# The AKID needs no check: stage.sh derives it from environments/$(ENV).tfvars.
 creds-guard:
-	@[[ -n "$${TF_VAR_secret_key:-}" ]] || { \
-	  printf 'error: TF_VAR_secret_key is not set.\n' >&2; \
-	  printf '  Every stage declares var.secret_key (sensitive, no default).\n\n' >&2; \
-	  printf '  source ~/.cache/tianlu-twin/dev-credentials.env\n' >&2; \
-	  printf '  export TF_VAR_secret_key="$$DEV_BOOTSTRAP_SECRET"\n\n' >&2; \
-	  printf '  If the dev twin has never run: export TF_VAR_secret_key=floci\n' >&2; \
+	@[[ -n "$${AWS_SECRET_ACCESS_KEY:-}" || -n "$${TF_VAR_secret_key:-}" \
+	   || -s '$(TWIN_SECRET_FILE)' ]] || { \
+	  printf 'error: no account secret available. Tried, in order:\n' >&2; \
+	  printf '         AWS_SECRET_ACCESS_KEY, TF_VAR_secret_key, %s\n\n' '$(TWIN_SECRET_FILE)' >&2; \
+	  printf '  Normally you export nothing: `make dev-up` (from the repo root) writes that\n' >&2; \
+	  printf '  file, and stage.sh reads it. If the twin is running but the file is missing,\n' >&2; \
+	  printf '  `make dev-env` regenerates it.\n\n' >&2; \
+	  printf '  To override: export TF_VAR_secret_key=<secret>\n\n' >&2; \
+	  printf '  Every stage declares var.secret_key (sensitive, no default), and the S3\n' >&2; \
+	  printf '  backend needs a credential of its own.\n' >&2; \
 	  exit 1; }
 
 # infra/AGENTS.md: never apply without G1/G2/G3. G1 (authorization actually enforced) is a
 # hard stop -- without it every IAM lesson in this estate is a false demo.
+#
 # The endpoint/region/AKID are passed explicitly: preflight-floci.sh defaults to the DEV
 # account, so an un-parameterised run would gate a uat/prod apply against dev.
+#
+# The ambient AWS_* variables are cleared rather than inherited. A leftover AWS_PROFILE is
+# the specific failure this estate has already hit twice: a profile can carry an empty
+# `ca_bundle =`, which AWS CLI v2 rejects client-side ("Invalid CA bundle ... empty or
+# whitespace-only string") before any request is sent -- and because preflight-floci.sh hides
+# stderr, that surfaces as the misleading "could not create access key (is IAM up?)".
+# Identity here comes from the tfvars and the twin's secret, never from an ambient profile.
+#
+# The secret is resolved in the recipe rather than in a make variable so the value never
+# enters make's variable space or `make -n` output. Same chain as stage.sh; "test" is the
+# last-resort default preflight-floci.sh itself uses.
 preflight:
 	@if [[ '$(SKIP_PREFLIGHT)' == '1' ]]; then \
 	  printf 'preflight SKIPPED (SKIP_PREFLIGHT=1) -- G1/G2/G3 unverified.\n' >&2; \
@@ -106,7 +132,14 @@ preflight:
 	  curl -fsS -m 5 -o /dev/null '$(ENDPOINT)' 2>/dev/null || { \
 	    printf 'error: Floci is not answering at %s -- start it (make dev-up) or pass SKIP_PREFLIGHT=1.\n' '$(ENDPOINT)' >&2; \
 	    exit 1; }; \
-	  DEV_AKID='$(AKID)' AWS_ENDPOINT_URL='$(ENDPOINT)' AWS_DEFAULT_REGION='$(REGION)' $(PREFLIGHT); \
+	  secret="$${AWS_SECRET_ACCESS_KEY:-$${TF_VAR_secret_key:-}}"; \
+	  if [[ -z "$$secret" && -s '$(TWIN_SECRET_FILE)' ]]; then \
+	    secret="$$(tr -d '\r\n' < '$(TWIN_SECRET_FILE)')"; \
+	  fi; \
+	  env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+	      -u AWS_SESSION_TOKEN -u AWS_CA_BUNDLE -u AWS_REGION \
+	    DEV_AKID='$(AKID)' FLOCI_ACCOUNT_SECRET="$${secret:-test}" \
+	    AWS_ENDPOINT_URL='$(ENDPOINT)' AWS_DEFAULT_REGION='$(REGION)' $(PREFLIGHT); \
 	fi
 
 # --- whole-estate loops -----------------------------------------------------------------
@@ -154,14 +187,20 @@ clean:
 	@printf 'restore with: make init STAGE=<stage>\n'
 
 # The remote-state bucket and lock table that 00-backend-bootstrap creates.
+# Same secret chain and same profile-clearing as `preflight`, for the same reasons: this is
+# the command you reach for when `init` reports NoSuchBucket, so it must not be able to
+# authenticate as a different account than the stage did and confirm the wrong answer.
 verify-backend:
 	@printf 'account %s at %s (%s)\n\n' '$(AKID)' '$(ENDPOINT)' '$(REGION)'
-	@AWS_ACCESS_KEY_ID='$(AKID)' AWS_SECRET_ACCESS_KEY="$${TF_VAR_secret_key:-test}" \
-	  aws --endpoint-url '$(ENDPOINT)' --region '$(REGION)' \
-	  s3api list-buckets --query 'Buckets[].Name' --output table
-	@AWS_ACCESS_KEY_ID='$(AKID)' AWS_SECRET_ACCESS_KEY="$${TF_VAR_secret_key:-test}" \
-	  aws --endpoint-url '$(ENDPOINT)' --region '$(REGION)' \
-	  dynamodb list-tables --output table
+	@secret="$${AWS_SECRET_ACCESS_KEY:-$${TF_VAR_secret_key:-}}"; \
+	if [[ -z "$$secret" && -s '$(TWIN_SECRET_FILE)' ]]; then \
+	  secret="$$(tr -d '\r\n' < '$(TWIN_SECRET_FILE)')"; \
+	fi; \
+	run() { env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_SESSION_TOKEN -u AWS_CA_BUNDLE \
+	  AWS_ACCESS_KEY_ID='$(AKID)' AWS_SECRET_ACCESS_KEY="$${secret:-test}" \
+	  aws --endpoint-url '$(ENDPOINT)' --region '$(REGION)' "$$@"; }; \
+	run s3api list-buckets --query 'Buckets[].Name' --output table; \
+	run dynamodb list-tables --output table
 
 # --- per-stage aliases ------------------------------------------------------------------
 # `make plan-10-management-iam` as a shorthand for `make plan STAGE=10-management-iam`.
