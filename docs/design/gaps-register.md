@@ -104,6 +104,30 @@ the design docs.
 
 ---
 
+## GAP-018 — `floci` subuid range is 65536, not the installer's 262144 [OPEN]
+
+`configure_subuid_subgid` skips allocation when `/etc/subuid` already contains a line for
+the user. Ubuntu's `useradd` allocates a 65536 range at user-creation time, and
+`create_floci_user` runs first, so the installer's 262144 range is never written on Ubuntu.
+Observed on the dev twin:
+
+```
+floci-runner:100000:65536
+floci:165536:65536
+```
+
+**Impact.** None for the current configuration: the Quadlet uses `UserNS=keep-id`, which
+maps a single uid/gid pair and needs no headroom. A container started with `--userns=auto`
+would draw disjoint slices from this range and exhaust it far sooner than the design
+intends.
+
+**Action.** Decide whether the installer should widen an existing range rather than accept
+it. Widening `/etc/subuid` for a user with running containers changes their mappings, so
+the check must compare the range size and only act when no rootless container is running.
+Until then, treat 65536 as the effective range on Ubuntu.
+
+---
+
 ## How to add a new gap
 
 1. Add an entry with the next sequential GAP-NNN ID.
