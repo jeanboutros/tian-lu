@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# Dedicated aws stub for mock-server bats tests.
+#
+# Replicates `aws configure set <key> <value> --profile <name>` so dev_env's
+# profile-writing path can be tested without the real AWS CLI (which is not
+# installed in CI containers or on a bare dev box). The real command writes:
+#   aws_access_key_id / aws_secret_access_key  -> $AWS_SHARED_CREDENTIALS_FILE
+#   region / output / endpoint_url             -> $AWS_CONFIG_FILE
+# in INI form under the profile section.
+#
+# Logs the full invocation to $STUB_LOG like the generic stub. Any other
+# subcommand falls through to the generic rc/stdout behaviour.
+set -u
+
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf 'aws %s\n' "$*" >>"$STUB_LOG"
+fi
+
+if [[ "${1:-}" == "configure" && "${2:-}" == "set" ]]; then
+  key="$3"
+  value="$4"
+  profile=""
+  # Parse trailing --profile <name> (may appear before or after the value).
+  prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "--profile" ]]; then
+      profile="$arg"
+    fi
+    prev="$arg"
+  done
+  [[ -n "$profile" ]] || { printf 'aws stub: configure set without --profile\n' >&2; exit 2; }
+
+  case "$key" in
+    aws_access_key_id|aws_secret_access_key)
+      file="${AWS_SHARED_CREDENTIALS_FILE:?}"
+      ;;
+    region|output|endpoint_url)
+      file="${AWS_CONFIG_FILE:?}"
+      ;;
+    *)
+      printf 'aws stub: unsupported configure key: %s\n' "$key" >&2
+      exit 2
+      ;;
+  esac
+
+  mkdir -p "$(dirname "$file")"
+  # Append/replace the key under the profile section. If the section exists,
+  # replace the key line in place; otherwise append the section.
+  if grep -qF "[$profile]" "$file" 2>/dev/null; then
+    if grep -qF "$key" "$file" 2>/dev/null; then
+      # Replace the existing key line (sed -i is not portable; rewrite in place).
+      tmp="$(mktemp "${file}.XXXXXX")"
+      awk -v k="$key" -v v="$value" '
+        $0 ~ "^" k "[[:space:]]*=" { print k " = " v; next }
+        { print }
+      ' "$file" >"$tmp" && mv -f "$tmp" "$file"
+    else
+      printf '%s = %s\n' "$key" "$value" >>"$file"
+    fi
+  else
+    printf '[%s]\n%s = %s\n' "$profile" "$key" "$value" >>"$file"
+  fi
+  exit 0
+fi
+
+# Generic fallback for non-configure invocations.
+name="aws"
+key="AWS"
+out_var="STUB_OUT_${key}"
+if [[ -n "${!out_var:-}" ]]; then
+  printf '%s\n' "${!out_var}"
+fi
+rc_var="STUB_RC_${key}"
+exit "${!rc_var:-0}"

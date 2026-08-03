@@ -571,7 +571,10 @@ n127.0.0.1:9999'; source '$DEV_SCRIPT'; preflight_ports"
   [ "${lines[0]}" = "${lines[1]}" ]
   local secret_file="${TEST_TMP}/.cache/tianlu-floci/dev/account.secret"
   local mode
-  mode="$(/usr/bin/stat -f '%Lp' "$secret_file" 2>/dev/null || /usr/bin/stat -c '%a' "$secret_file" 2>/dev/null)"
+  # GNU stat first (-c), BSD fallback (-f): on Linux `stat -f` means "filesystem"
+  # and prints a multi-line dump with exit 0, so a BSD-first order never reaches
+  # the -c fallback and the mode assertion fails. Same pattern as tests/phase5.bats.
+  mode="$(/usr/bin/stat -c '%a' "$secret_file" 2>/dev/null || /usr/bin/stat -f '%Lp' "$secret_file" 2>/dev/null)"
   [ "$mode" = "600" ] || [ "$mode" = "0600" ]
 }
 
